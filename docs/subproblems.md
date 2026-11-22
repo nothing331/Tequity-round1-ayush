@@ -38,9 +38,10 @@ next, and standard plumbing comes last.
 - **What:**
   - **Records:** customers and contacts.
   - **For every field:** value, `updatedAt`, source (portal / Salesforce), actor, and the last applied Salesforce `sequence`.
-  - **History:** an append-only table with one row per field change: record, field, old value, new value, actor, source, time, `eventId` or change ID, and a "superseded" flag.
+  - **History:** an append-only table with one row per field change: record, field, old value, new value, actor, source, time, `eventId` or change ID, `via` (`portal_save` / `webhook` / `fetch` / `replay` / `reconcile`, which says how exact the actor is), and a "superseded" flag.
 - **Why first:** every rule reads or writes this. If state is kept per record instead of per field, the brief's own scenario fails: finance's city and sales's phone can't both survive.
-- **Decisions:** D15 (history, retention), D16 (per-field `updatedAt`), D19 (per-field `sequence`).
+- **Decisions:** D15 (history, retention), D16 (per-field `updatedAt`), D19 (per-field `sequence`), S1 (first/last name as two fields), S3b (`via`).
+- **Locking (G2):** every write goes through `withRecordLock(recordId, fn)`: lock the record row, read, apply, write, commit. Lock order is customer before contact.
 - **Done when:** the brief's scenario can be stored with both actors and both times visible. A Salesforce create, then a portal city edit, then a Salesforce phone edit all show in history, and the current state has the new phone and the finance city.
 
 ## 2. Inbound apply rule (a plain function with no I/O)
@@ -67,7 +68,9 @@ next, and standard plumbing comes last.
   - **The outbox:** a portal edit writes the record, history and an outbox row **in one transaction**.
   - **Merging:** each record has at most one pending row, and a new edit updates it. A row being sent is locked, so edits arriving meanwhile go to a new row.
   - **Sending:** the worker sends to a **fake Salesforce**. Creates are upserts on `Portal_Id__c`, and every write carries `Portal_Change_Id__c`.
-  - **Confirmation:** the API reply is the confirmation.
+  - **Confirmation:** the API reply is the confirmation, and it returns the record's new version.
+  - **Conditional update (G1):** every update carries the record version we last saw. A `412` leads to a GET, then the conflict rule per field, then a resend of only the winning fields. If the GET shows our own `Portal_Change_Id__c`, our earlier attempt landed.
+  - **Three-step send (G2b):** claim (transaction), HTTP call (no transaction), store result (transaction). The Salesforce client throws if it is called inside `withRecordLock`.
 - **Why third:** the next biggest risk is duplicates in Salesforce and loops. Every outbound feature depends on it.
 - **Rules:**
   - **Safe retries (D8, D9):** a retry after a lost reply resends the same content with the same key. The upsert finds the existing record.
@@ -78,6 +81,8 @@ next, and standard plumbing comes last.
   - a webhook received for our own write adds no outbox row and no extra history row
   - a webhook from Salesforce is never sent back to Salesforce
   - a queued older portal value doesn't overwrite a newer Salesforce value
+  - **a sales edit that lands in Salesforce after our guard check but before our send gets a `412`, and both sides end on the later value** (G1)
+  - calling the Salesforce client inside `withRecordLock` throws (G2b)
 
 ## 4. Rate limiter, 429 handling, circuit breaker, surviving a restart
 
@@ -98,14 +103,14 @@ next, and standard plumbing comes last.
 
 ## 5. Outage catch-up
 
-- **What:** after the breaker closes:
-  1. **Replay Salesforce's change log first:** events after the last `eventId` we applied, falling back to "modified since T".
+- **What:** after the breaker closes, or after our own database comes back:
+  1. **Replay Salesforce's change log first:** from the last receiver heartbeat before the outage minus a 10-minute overlap (G4), falling back to "modified since T". Not from "the last `eventId` we applied", because webhooks arrive out of order. The overlap's duplicates are dropped by the inbox and `sequence`.
   2. **Then drain** with a ramp of 20 → 40 → 80 req/s, split **50/50 between fresh edits and the backlog, each borrowing the other's unused share**. The lane comes from `created_at` against the recovery time.
 - **Why fifth:** it builds on 3 and 4. Replaying first is what stops an older queued portal value overwriting a newer sales edit made during the outage.
-- **Decisions:** D3, D11, D21.
+- **Decisions:** D3, D11, D21, G4.
 - **Arithmetic it must reproduce (scaled down in a demo):**
   - **Backlog:** 432,000 calls.
-  - **Replay:** 324 calls.
+  - **Replay:** 324 calls, plus 9 for the 10-minute overlap (30 edits/s × 600 s ÷ 2,000). The drain stays at about 122 min (60T = 438,333).
   - **Drain:** 60T = 438,324, so about **122 min** in the worst case, or about 62 min if 50% merged.
 - **Done when:** after a simulated outage, replay finishes before the first outbound call. Fresh edits sync in under 30 s once the ramp ends. The backlog drains in the time the formula predicts for the configured cap.
 
@@ -134,7 +139,9 @@ next, and standard plumbing comes last.
 | Rejected update (4xx) | Revert to the last value Salesforce confirmed **only if the field still holds the rejected value**. Show "rejected by Salesforce: <reason>" | D10 |
 | Two portal users, same field | Each changed field carries the `updatedAt` the form loaded. A mismatch gets `409` with the current value. Other fields are accepted | D20 |
 | Gap in the sequence | Apply the newer event and log the gap. If the missing one hasn't arrived within 10 s, replay that record from the change log | D19 |
-| Overwritten finance edit | Badge on the field, built from history: "replaced by <actor> in Salesforce at <time>" | D16 |
+| Overwritten finance edit | Badge on the field, built from history: "replaced by <actor> in Salesforce at <time>", with a "Use my value again" button that sends a normal PATCH with `baseUpdatedAt` | D16, G1b |
+| Reconciliation sweep | Every 5 min, "records modified since the watermark minus an overlap", each record through the normal apply rule (`via = reconcile`). Catches webhooks missed by any path | G3 |
+| Database outage recovery | After Postgres returns, replay from the last heartbeat minus 10 minutes. Beyond the log's retention, "modified since". Beyond that, page "unrecoverable window" | G4 |
 
 - **Why last:** each is small and depends on 1–5.
 

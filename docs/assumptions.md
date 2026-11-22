@@ -30,7 +30,7 @@ The brief asks for this section at the top of the design document. Each entry ha
 ### 1.3 Changes made during the 6-hour outage (D3)
 - **Question:** Can we ask Salesforce for the records that changed during the 6 hours, or are those changes gone unless we already have them?
 - **Assumption:**
-  - Salesforce keeps a **replayable change log**: "give me every event after `eventId` X".
+  - Salesforce keeps a **replayable change log**: "give me every event from time T". We replay from the last receiver heartbeat before the outage minus a 10-minute overlap, not from "the last `eventId` we applied", because webhooks arrive out of order (G4).
   - The log is kept for **at least 24 h**.
   - Each request returns a page of **2,000 events**.
   - **Fallback (worst case):** if the log has expired, query records modified since the outage began.
@@ -121,7 +121,7 @@ The brief asks for this section at the top of the design document. Each entry ha
 ### 3.3 What a write returns (D9)
 - **Question:** What does Salesforce send back on create or update? Is it the ID later webhooks carry?
 - **Assumption:**
-  - **The reply:** the record ID, success or an error code, and the new `LastModifiedDate`.
+  - **The reply:** the record ID, success or an error code, the new `LastModifiedDate`, and the record's new `sequence` (its version for the next conditional update, G1).
   - **The ID:** the one returned on create is the permanent ID, and every later webhook carries it. We store only the **18-character** form.
   - **A lost create reply:** we match the create's webhook by `Portal_Id__c`.
 - **If the answer goes the other way:** if Salesforce returns only success with no ID, we always match by `Portal_Id__c`.
@@ -154,6 +154,35 @@ The brief asks for this section at the top of the design document. Each entry ha
 - **If the answer goes the other way:** if Salesforce guarantees customer-before-contact, the fetch never fires, and the rule is harmless.
 
 ---
+
+### 3.8 Fetching one record (S3)
+- **Question:** When we fetch a single record (a missing customer, or an update for a record we don't have), what does the reply contain?
+- **Assumption:** the GET reply includes the record's current **`sequence`** plus `LastModifiedById` and `LastModifiedDate`. Fetched fields are stamped with that `sequence`, so a late older webhook is rejected by the normal out-of-order rule. History rows for fetched fields have `via = fetch`, with the record's last modifier as the actor.
+- **If the answer goes the other way:** without `sequence` in the reply, we compare `LastModifiedDate` with the webhook's `occurredAt`, which is weaker under clock skew.
+
+### 3.9 Authentication (S5)
+- **Question:** How does our worker sign in to the Salesforce API?
+- **Assumption:** **OAuth 2.0 JWT bearer** for a dedicated integration user. The client uploads our certificate to a connected app. The token is cached until it expires and refreshed on a `401`. Token calls go to the login endpoint, **outside the 100 req/s cap** (about 1 call/hour even if counted).
+- **If the answer goes the other way:** if the client only allows username-password, we store a secret that expires and breaks sync until rotated.
+
+### 3.10 IP restrictions (S6)
+- **Question:** Does the client restrict the integration user's login to listed IP addresses?
+- **Assumption:** they may. Our worker calls out through a NAT gateway with a **fixed public IP** (one per availability zone), which they can list. Outbound traffic is allowed only to the Salesforce instance and login hosts.
+- **If the answer goes the other way:** with no IP restriction, the fixed IP is still kept for the outbound allowlist and for a clean audit trail.
+
+### 3.11 Field mapping (S1)
+- **Assumption:** customer = `Account` (`Name`, custom `Status__c`, `OwnerId`); contact = `Contact` (`FirstName` + `LastName`, `Phone`, `Email`, `MailingCity`, `OwnerId`, `AccountId`). The brief's "full name" is **stored as two fields**, because `Contact.Name` is read-only in Salesforce.
+- **If the answer goes the other way:** if the client has a writable full-name field, the portal could keep one field, but sales users editing First/Last in Salesforce would make the two drift.
+
+### 3.12 Conditional update (G1)
+- **Question:** Can an update say "apply only if the record hasn't changed since version N"?
+- **Assumption:** yes. An update carries the record version we last saw, and Salesforce replies `412` and changes nothing if the record has moved on. Real Salesforce REST has this (`If-Unmodified-Since` / `If-Match`). It is record-level, so a change to another field also gives a `412`.
+- **If the answer goes the other way:** an in-flight portal write can overwrite a newer sales edit. We fall back to repairing after our echo arrives: Salesforce is briefly wrong, then corrected.
+
+### 3.13 "Records modified since T" query (G3)
+- **Question:** Can we ask for the records modified since a point in time, with their field values?
+- **Assumption:** yes, 2,000 records per call. Used by the 5-minute reconciliation sweep and as the replay fallback. About 5 calls per object every 5 minutes at peak.
+- **If the answer goes the other way:** no sweep. A missed webhook without a later `sequence` gap stays wrong until the record is edited again. This becomes a blocker question.
 
 ## 4. Portal, conflicts and history
 
@@ -249,3 +278,8 @@ Replaying first takes 324 of minute 1's 1,200 calls, so the sum becomes 60T = 43
 8. How long to keep history, may the archive ever be deleted, and is it searched across all records (4.3)?
 9. How often do outage-period edits hit the same record (4.4)?
 10. Can Salesforce sign webhooks with HMAC (2.5)?
+11. The story says finance corrects the **billing city** (`Account.BillingCity`), but the field list puts city on the **contact** (`Contact.MailingCity`). Which one (3.11)?
+12. Does the record API's single-record GET return the record's `sequence` (3.8)?
+13. Is the integration user restricted to listed login IPs (3.10)?
+14. Does the record API support conditional updates ("only if unchanged since version N", `412`) (3.12)?
+15. Can we query records modified since a time, with their field values (3.13)?

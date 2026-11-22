@@ -41,6 +41,206 @@ Later (architecture, after assumptions are locked)
   D26 What we leave out this weekend .................... DECIDED
 ```
 
+## Phase 2 - The systems section (outline item 2)
+
+```
+Round 1 (prerequisites already settled by D1-D26)
+  S1  Object and field mapping (Account/Contact, full name, city, status, owner) .. DECIDED
+  S2  Webhook endpoint contract (path, headers, body, response codes) ............. DECIDED
+  S3  Update webhook for a record we do not have yet ............................. DECIDED (a)
+  S4  Portal edit interface and who writes the outbox ............................ DECIDED (a)
+  S5  How the worker authenticates to Salesforce ................................. DECIDED (a)
+  S6  Network boundary (what is public, egress, database exposure) ............... DECIDED (egress a)
+
+Round 2
+  S3b History rows for a fetched record, and the fetch's sequence ............... DECIDED (via column; GET returns sequence)
+  S6b Receiver instances behind the load balancer ............................... DECIDED (1 receiver, auto-restart; 1 worker + standby)
+
+Frontier empty - all Phase 2 decisions made.
+
+Then: write the systems section (diagram + interface on each side) from S1-S6.
+```
+
+### S1 - Object and field mapping (DECIDED)
+- customer = `Account`, contact = `Contact`.
+- customer name -> `Account.Name`; status -> `Account.Status__c` (custom); owner -> `Account.OwnerId`.
+- contact full name -> **stored as two portal fields** `first_name` / `last_name` -> `Contact.FirstName` /
+  `Contact.LastName`, shown together as the full name. Reason: `Contact.Name` is read-only in Salesforce.
+  They are two separate fields for conflicts, ordering and history.
+- phone / email -> `Contact.Phone` / `Contact.Email`; city -> `Contact.MailingCity`;
+  owner -> `Contact.OwnerId`; customer -> `Contact.AccountId`.
+- The design doc must say why the brief's "full name" is two fields.
+- Client question: the story says "billing city" (`Account.BillingCity`) but the field list puts city
+  on the contact.
+- Rejected: split on the last space (silent damage to names like "Mary Ann Van Dyke");
+  custom `FullName__c` (drifts from First/Last edited in Salesforce).
+
+### S4 - Portal edit interface and who writes the outbox (DECIDED: a)
+- `POST /api/{customers|contacts}` (portal generates `Portal_Id__c`);
+  `PATCH /api/{customers|contacts}/{id}` with `changedFields` + per-field `baseUpdatedAt`;
+  responses `200`, `409` per field, `400`.
+- A shared `saveEdit()` module in the portal backend writes record + history + outbox in one
+  Postgres transaction.
+- Accepted costs and their mitigations (also written into the project CLAUDE.md so future work
+  keeps them): sync tables in their own `sync` schema; same language (TypeScript/Node, assumed);
+  every portal write goes through `saveEdit()` with a test that fails on a record change without an
+  outbox row; capped connection pool per service; a failed outbox insert fails the save (deliberate);
+  one Postgres role per service with least privilege.
+- Rejected: internal HTTP to the sync service (two writes, breaks D23); Postgres trigger (fires on
+  webhook writes, breaks D17 unless hidden session-variable logic).
+
+### S6 - Network boundary (DECIDED)
+- Public: only `POST /webhooks/salesforce`, HTTPS 443, TLS at the load balancer, HMAC in the receiver.
+  No inbound IP allowlist (Salesforce ranges are broad and change); HMAC is the check.
+- Outgoing (a): the worker reaches the internet only through a NAT gateway with a **fixed public IP**
+  (one per availability zone), which the client can add to the integration user's Login IP Ranges;
+  plus an **outbound allowlist** to the Salesforce instance and login hosts only.
+- Postgres: private network only. Portal backend: reached by portal users through its own login,
+  never talks to Salesforce.
+- Rejected: fixed IP without allowlist (worker can reach the whole internet); whatever cloud IP
+  (outbound sync stops if the client restricts login IPs).
+
+### S6b - Instances (DECIDED)
+- Worker: one active copy plus a standby via the Postgres advisory lock (D11). More workers would not
+  send faster; the cap is Salesforce's 100 req/s.
+- Receiver (round 3, a): **one copy**, restarted by the platform's health check on a crash (about
+  30-60 s), with **rolling deploys** (the new copy passes its health check before the old one stops).
+  Stateless, so scaling out later is a setting.
+- Accepted risk: a crash can delay webhooks past 30 s. Nothing is lost (Salesforce retries, D19 gap
+  check). **M2 (webhook delay p95 > 30 s) is the trigger to move to two running copies.**
+- Rejected: a cold spare (same recovery time as an auto-restart, more setup); two running copies
+  now (user chose to start small; a running "emergency copy" costs the same as two copies).
+
+### S3b - Fetched record history and order (DECIDED)
+- Part 2: assume the record API's GET reply includes the record's current `sequence`; fetched fields
+  are stamped with it so a late older webhook is rejected by D19. Fallback if not: compare
+  `LastModifiedDate` with `occurredAt` (weaker).
+- Part 1 (round 3, a): one history row per fetched field, and history gains a **`via`** column:
+  `portal_save` | `webhook` | `fetch` | `replay` | `reconcile`. For `fetch`, the actor is the record's
+  `LastModifiedById` and the UI says "fetched from Salesforce, last modified by X". `reconcile`
+  replaces the free-text "reconciled after outage" note from D3.
+- Rejected: a yes/no `actor_exact` column (says unsure but not why); reading Salesforce field history
+  objects (extra calls from the headroom, needs field history tracking on).
+
+### S2 - Webhook endpoint contract (DECIDED)
+- One endpoint `POST /webhooks/salesforce`, split by `objectType`. Headers `X-Signature`
+  (HMAC-SHA256 of timestamp + body) and `X-Timestamp`. Body = the sample plus `sequence`;
+  `Portal_Id__c` / `Portal_Change_Id__c` arrive inside `changedFields`.
+- Codes: `200` applied or duplicate; `401` bad signature or stale timestamp (no retry);
+  `503` our database is down (Salesforce retries).
+- **Malformed body -> `400`, nothing stored, no retry.** User's reason: a broken body is the
+  sender's problem, and retrying it can never succeed. We still write an application log line and
+  count it toward the M3 failure rate, so a broken Salesforce payload is noticed.
+- Rejected: store as `invalid` in the inbox and return `200` (hides the error from Salesforce).
+
+### S3 - Update webhook for an unknown record (DECIDED: a)
+- Store a partial record with the fields received, and write a job row so the worker fetches the
+  full record (5 s / 15 s / 25 s, from the 20 req/s headroom), same pattern as D14.
+- Rejected: ignore and wait for replay (replay may never run outside an outage); hold the webhook
+  (the create may never come).
+- Follow-up S3b: what history rows the fetch writes, and how fetched values are ordered against
+  late webhooks.
+
+### S5 - Salesforce authentication (DECIDED: a)
+- OAuth 2.0 JWT bearer flow for a dedicated integration user; private key held by the worker,
+  certificate uploaded to a Salesforce connected app.
+- Token cached until expiry, refreshed on `401`. Token calls go to the login endpoint, assumed
+  outside the 100 req/s record-API cap (about 1 call/hour even if counted).
+- Rejected: username-password (stored password, expiry breaks sync); client credentials
+  (depends on the client's org setup).
+
+## Phase 3 - Review questions from the user (gaps found)
+
+```
+  G1  Same field, both sides, while our write is in flight (also: guard-then-send race) .. DECIDED (a)
+      Found: with D16 + D17 as written, portal ends "Delhi" and Salesforce "Noida" forever,
+      or the reverse, depending on which webhook arrives first. The outbox guard only knows
+      what has already reached us, so it cannot stop this.
+  G2  Concurrent writers of per-field state (portal backend, receiver, worker) ............ DECIDED (a)
+      Found: no lock or compare-and-set is specified; two transactions can read the same
+      state and the later commit silently discards the earlier decision.
+  G3  Fallbacks if Salesforce has no sequence / no retry on 503 / no change-log replay ... DECIDED (table + sweep a)
+  G4  Postgres down longer than Salesforce keeps retrying ............................... DECIDED (a)
+      Also found: "replay after the last eventId we applied" is not a safe cursor when
+      webhooks arrive out of order (we may hold 105 but miss 103).
+
+Round 2
+  G1b What the portal user is told after losing a G1 race, and what they can do ......... DECIDED (a)
+  G2b How "never hold a lock while calling Salesforce" is enforced, and other ways a
+      lock can be held too long ......................................................... DECIDED (a)
+
+Frontier empty - all Phase 3 decisions made.
+```
+
+### G1b - What the user sees after a 412 (DECIDED: a)
+- Their edit still later: worker resends automatically; user sees "pending sync" then synced.
+- Sales's edit later: field takes sales's value, finance's goes to history as superseded; badge (D16)
+  "Replaced by <actor> in Salesforce at <time>. Your value '<v>' (saved <time>) is in history."
+- Badge has a **"Use my value again"** button: a normal new PATCH with `baseUpdatedAt` = the current
+  value's time, so it wins by time and goes out with a precondition; if the field changed again meanwhile,
+  the user gets the usual 409 (D20). Overriding is always a deliberate human action.
+- No notifications table: the badge shows when the record or list is opened.
+- After 5 consecutive 412s on one outbox row: slower retry with jitter, counted in M3; never dropped.
+- Rejected: badge only (retyping, typos); automatic retry until it sticks (endless fight = loop).
+
+### G2b - Enforcing short locks (DECIDED: a)
+- Send in three steps: claim (tx: lock, guard, read version, row -> `sending`, `claimed_at`) -> HTTP call
+  with no transaction open -> result (tx: lock, store version / handle 412 / 4xx revert).
+- Crash between steps: nothing locked; rows in `sending` > 60 s are resent with the same
+  `Portal_Change_Id__c`. A 412 whose GET shows our own change ID on the record = our write landed ->
+  mark sent, no resend.
+- `withRecordLock(recordId, fn)` is the only way to open a transaction; it sets an AsyncLocalStorage
+  flag and the Salesforce client throws if called while it is set (unit-tested).
+- Per-role Postgres settings: `idle_in_transaction_session_timeout = 5s`, `lock_timeout = 2s`,
+  `statement_timeout = 5s`. On timeout: receiver 503 (Salesforce retries), portal retries once then
+  "please try again", worker retries next pass.
+- Scenario rules: one record per transaction for replay / drain / sweep (or small sorted batches);
+  `saveEdit()` does DB writes only, side effects after commit; D14 contact linking in batches of 500;
+  lock order customer then contacts by ID (deadlock victim retries); TCP keepalives; worker heartbeat +
+  health-check kill so a hung leader frees the advisory lock (M1 also pages); migrations with
+  `lock_timeout` in quiet hours; history reports on a replica later.
+- Rejected: convention + review only (fails under load in production); timeouts only (kills but never
+  prevents).
+
+### G1 - Same field on both sides while our write is in flight (DECIDED: a)
+- Conditional update: the worker sends the record version it last saw; if Salesforce's record has
+  changed, Salesforce returns `412` and changes nothing. Worker GETs the record (headroom), re-runs D16
+  per field, resends only the fields that still win, with the new version.
+- The write's reply must return the record's new version (assumption), else every follow-up send 412s.
+- The outbox guard stays as a cheap pre-filter; correctness rests on the precondition.
+- Assumption: the brief does not give conditional updates; real Salesforce REST has
+  `If-Unmodified-Since` / `If-Match` -> `412`. The fake Salesforce implements it.
+- Cost: record-level, so a change to another field also 412s (one GET + one resend); rare at
+  30 edits/s over 5M records.
+- Rejected: repair after echo (Salesforce briefly wrong, breaks D17's simple rule); Salesforce arrival
+  order wins (a slow queue picks the winner; old drain values beat fresh sales edits).
+
+### G2 - Concurrent writers of per-field state (DECIDED: a)
+- Every writer: lock the record row (`SELECT ... FOR UPDATE`) -> read -> pure apply function -> write
+  state + history -> commit. Lock order: customer before contact.
+- The worker never holds a lock while calling Salesforce (enforcement in G2b).
+- Rejected: per-field compare-and-set (retry loops in three components); SERIALIZABLE (retries
+  everywhere, false aborts).
+
+### G3 - Fallbacks when Salesforce lacks sequence / retries / replay (DECIDED)
+- The fallback table goes into the design doc: no `sequence` -> order by `occurredAt`, dedupe by
+  `eventId` only, G1 version = `LastModifiedDate`, missed webhooks invisible; no retry -> crashes lose
+  webhooks, S6b moves to 2 copies; no replay -> "modified since T" (`via = reconcile`), else a full scan.
+- Reconciliation sweep (a): every 5 min, "records modified since last sweep minus overlap", the 9 fields
+  returned directly, each record through the normal apply rule. ~5 calls per object per 5 min at peak
+  (about 0.03 req/s). Watermark stored in Postgres. "Modified since" is itself an assumption.
+- Rejected: no sweep (silent loss if any assumption is wrong); sweep only after outages (misses a crash
+  when Salesforce does not retry).
+
+### G4 - Postgres down longer than Salesforce retries (DECIDED: a)
+- At risk: only Salesforce changes (the portal is down too, so no portal edits are made).
+- The receiver writes a heartbeat row. After any database outage the worker replays the change log
+  from the last heartbeat before the outage minus a 10-minute overlap; inbox + sequence drop what we
+  already have. This replaces D3's unsafe "after the last eventId we applied" cursor everywhere.
+- Beyond log retention (>= 24 h assumed): "modified since" gives current values (`via = reconcile`).
+  Beyond that: page "unrecoverable window T1-T2, full scan needed". Never silent.
+- Rejected: durable buffer in front of Postgres (second store, 200 before applied); accept the loss.
+
 ## Decisions
 
 ### D1 - Peak and quiet edit rates - DECIDED
