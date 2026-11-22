@@ -83,6 +83,9 @@ Only rows in Postgres:
 | `sync.inbox` | receiver | receiver | Duplicate removal by `eventId` and (recordId, sequence), kept 7 days (D18) |
 | `sync.heartbeat` | receiver | worker | Last time the receiver could write. After a database outage, replay starts here minus 10 minutes (G4) |
 | `sync.watermarks` | worker | worker | The reconciliation sweep's "modified since" point (G3) |
+| `sync.sf_users` | worker | portal backend, receiver | Salesforce users who can be an owner, so the portal checks an owner before saving (V3) |
+
+Full columns, indexes and sizes for every table are in [data.md](data.md).
 
 ### Three writers, one record: the lock rule (G2, G2b)
 
@@ -100,7 +103,7 @@ BEGIN -> SELECT ... FOR UPDATE on the record row -> read per-field state
 - **No Salesforce call inside a transaction.** The worker sends in three steps:
 
   ```
-  claim:   BEGIN; lock; guard; read version; outbox row -> 'sending'; COMMIT
+  claim:   BEGIN; lock; guard; read sf_seq_contiguous; outbox row -> 'sending'; COMMIT
   call:    HTTP to Salesforce, no transaction open
   result:  BEGIN; lock; store new version / handle 412 / 4xx revert; COMMIT
   ```
@@ -143,19 +146,22 @@ and lets us detect a missed webhook (D4, D19).
 {
   "eventId": "evt_9f2c...",
   "objectType": "Contact",
-  "recordId": "003XXXXXXXXXXXXXXX",
-  "sequence": 42,
-  "occurredAt": "2026-11-22T10:15:03.120Z",
-  "changedBy": "005XXXXXXXXXXXXXXX",
+  "recordId": "0031A00000Abc",
+  "sequence": 3,
+  "occurredAt": "2026-11-02T11:30:04.000Z",
+  "changedBy": "sales.user@client.example",
   "changedFields": {
-    "Phone": "+91 98100 00000",
-    "Portal_Change_Id__c": "chg_7a1e..."
+    "phone": "+919876543210"
   }
 }
 ```
 
 - **Changed fields only** (D2). If a full record arrives instead, each field still goes through the same
   per-field `sequence` check, so unchanged fields are no-ops.
+- Field keys are the logical names the brief's sample uses (`phone`, `city`). `changedBy` is an email, and it
+  is stored as the history `actor` (data.md, V4).
+- An unknown `recordId` with `sequence` 1 is a create carrying every field, so no fetch is needed. With
+  `sequence` above 1 it goes to S3: store the fields we have, and fetch the rest (V8).
 - `Portal_Id__c` and `Portal_Change_Id__c` appear in `changedFields` when our own write set them. That is how
   we recognise our own echo (D8, D17).
 
@@ -178,17 +184,18 @@ per request. Batching is not assumed.
 
 | Call | Used for | Key detail |
 |---|---|---|
-| **Upsert by External ID** on `Portal_Id__c` | Portal creates | A retry after a lost reply finds the same record, so there is no duplicate (D8). The reply gives the 18-character record ID (D9) |
-| **Conditional update by record ID** | Portal edits | Sends only the changed fields plus `Portal_Change_Id__c`, **only if the record is still at the version we last saw** (G1). The reply is the confirmation and returns the new version (D9) |
-| **GET one record** | Missing customer (D14), unknown record (S3), after a `412` (G1) | The reply includes `sequence`, `LastModifiedById`, `LastModifiedDate` and `Portal_Change_Id__c` (assumption 3.8) |
+| **Upsert by External ID** on `Portal_Id__c` | A record with no `sf_id` yet (decided at claim time, V7) | A retry after a lost reply finds the same record, so there is no duplicate (D8). The reply gives the record ID (D9). A contact whose customer has no `sf_id` yet is held 2 s at a time until it does (V2) |
+| **Conditional update by record ID** | A record with an `sf_id` | Sends only the changed fields plus `Portal_Change_Id__c`, **only if the record is still at `sf_seq_contiguous`**, the highest sequence with no gap below it (G1, V1). The reply is the confirmation and returns the new version (D9) |
+| **GET one record** | Missing customer (D14), unknown record with sequence > 1 (S3, V8) | The reply includes `sequence`, `LastModifiedDate` and the last modifier's email (assumption 3.8). **Not used after a `412`** (V1) |
+| **List active users** | Hourly refresh of `sync.sf_users`, plus unknown owner IDs (V3) | About 1 call an hour from the headroom (assumption 3.14). Described, not built this weekend |
 | **Change-log replay**: events from a point in time, 2,000 per page | After any outage, Salesforce's or ours: from the last heartbeat minus 10 minutes (G4). Also a per-record gap (D19) | Duplicates from the overlap are dropped by the inbox and `sequence` |
-| **Records modified since T**: the 9 fields, 2,000 per page | The 5-minute reconciliation sweep (G3); the replay fallback (D3) | About 5 calls per object every 5 minutes at peak. Applied through the normal rule (`via = reconcile`) |
+| **Records modified since T**: the 10 fields, 2,000 per page | The 5-minute reconciliation sweep (G3); the replay fallback (D3) | About 5 calls per object every 5 minutes at peak. Applied through the normal rule (`via = reconcile`) |
 | **OAuth token** (login endpoint) | JWT bearer exchange | About 1 call/hour, assumed outside the cap (S5) |
 
 | Reply | Worker does |
 |---|---|
 | `2xx` | Marks the outbox row sent and stores the returned ID and new version |
-| `412` (record changed since our version) | GETs the record. If its `Portal_Change_Id__c` is ours, our earlier attempt landed: marks it sent. Otherwise re-runs D16 per field and resends only the fields that still win, with the new version. Fields that lost show the badge (G1b). After 5 `412`s in a row: slower retry, counted in M3 |
+| `412` (Salesforce has events we haven't applied) | No GET (V1). Puts the row back to `pending` for 5 s, so the webhooks in flight can land. If none has moved `sf_seq_contiguous` past the row's `base_version` by then, runs a `replay_record` job first. Then re-runs the guard on exact per-field times and resends only the fields that still win. If our own earlier attempt had landed (a lost reply), its echo arrives carrying our `change_id` and the row is marked sent. Fields that lost show the badge (G1b). After 5 `412`s in a row: slower retry, counted in M3 |
 | `429` + `Retry-After` | Pauses **all** sending for that long and keeps the work (D11) |
 | `5xx` or timeout | Retries with exponential backoff and jitter. 5 failures in a row open the breaker, with a test call every 30 s |
 | `4xx` (validation) | Doesn't retry. Reverts the field only if it still holds the rejected value, and shows "rejected by Salesforce: reason" (D10) |

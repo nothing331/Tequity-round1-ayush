@@ -130,7 +130,7 @@ The brief asks for this section at the top of the design document. Each entry ha
 - **Question:** Which fields may we change? Are there validation rules, read-only fields, or fields owned by one team?
 - **Assumption:**
   - The integration user can write all nine fields: customer name, status and owner; contact full name, phone, email, city, owner and customer.
-  - **`owner`** is a Salesforce user ID. Portal users can only choose users synced from Salesforce.
+  - **`owner`** is a Salesforce user ID. Portal users can only choose active users from `sync.sf_users`, which the worker refreshes hourly (3.14, V3).
 - **If the answer goes the other way:** read-only fields become read-only in the portal too, and are never sent.
 
 ### 3.5 Rejected updates (D10)
@@ -157,7 +157,7 @@ The brief asks for this section at the top of the design document. Each entry ha
 
 ### 3.8 Fetching one record (S3)
 - **Question:** When we fetch a single record (a missing customer, or an update for a record we don't have), what does the reply contain?
-- **Assumption:** the GET reply includes the record's current **`sequence`** plus `LastModifiedById` and `LastModifiedDate`. Fetched fields are stamped with that `sequence`, so a late older webhook is rejected by the normal out-of-order rule. History rows for fetched fields have `via = fetch`, with the record's last modifier as the actor.
+- **Assumption:** the GET reply includes the record's current **`sequence`**, `LastModifiedDate`, and the last modifier's **email** (the same form as a webhook's `changedBy`). Fetched fields are stamped with that `sequence`, so a late older webhook is rejected by the normal out-of-order rule. History rows for fetched fields have `via = fetch`, with that email as the actor. The GET is **not** used after a `412`; that path waits for webhooks and replays instead (V1).
 - **If the answer goes the other way:** without `sequence` in the reply, we compare `LastModifiedDate` with the webhook's `occurredAt`, which is weaker under clock skew.
 
 ### 3.9 Authentication (S5)
@@ -183,6 +183,11 @@ The brief asks for this section at the top of the design document. Each entry ha
 - **Question:** Can we ask for the records modified since a point in time, with their field values?
 - **Assumption:** yes, 2,000 records per call. Used by the 5-minute reconciliation sweep and as the replay fallback. About 5 calls per object every 5 minutes at peak.
 - **If the answer goes the other way:** no sweep. A missed webhook without a later `sequence` gap stays wrong until the record is edited again. This becomes a blocker question.
+
+### 3.14 Listing Salesforce users (V3)
+- **Question:** Can we list the active Salesforce users who may own a record?
+- **Assumption:** yes, one query returns about 2,000 users per call. The worker refreshes `sync.sf_users` hourly and looks up any unknown owner ID that arrives in a webhook. About 1 call an hour.
+- **If the answer goes the other way:** the portal accepts any owner ID, Salesforce validates it, and a bad ID goes down the rejection path (D10). History shows raw IDs for owners.
 
 ## 4. Portal, conflicts and history
 
@@ -283,3 +288,4 @@ Replaying first takes 324 of minute 1's 1,200 calls, so the sum becomes 60T = 43
 13. Is the integration user restricted to listed login IPs (3.10)?
 14. Does the record API support conditional updates ("only if unchanged since version N", `412`) (3.12)?
 15. Can we query records modified since a time, with their field values (3.13)?
+16. Can we list active Salesforce users, and does the single-record GET return the last modifier's email (3.8, 3.14)?

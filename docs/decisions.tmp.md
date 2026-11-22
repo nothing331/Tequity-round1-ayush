@@ -136,6 +136,8 @@ Then: write the systems section (diagram + interface on each side) from S1-S6.
 ### S3 - Update webhook for an unknown record (DECIDED: a)
 - Store a partial record with the fields received, and write a job row so the worker fetches the
   full record (5 s / 15 s / 25 s, from the 20 req/s headroom), same pattern as D14.
+- **Refined by V8:** an unknown record with `sequence` 1 is a create carrying every field - insert it, no
+  fetch. The partial-plus-fetch path applies only to `sequence` > 1.
 - Rejected: ignore and wait for replay (replay may never run outside an outage); hold the webhook
   (the create may never come).
 - Follow-up S3b: what history rows the fetch writes, and how fetched values are ordered against
@@ -189,6 +191,7 @@ Frontier empty - all Phase 3 decisions made.
 - Crash between steps: nothing locked; rows in `sending` > 60 s are resent with the same
   `Portal_Change_Id__c`. A 412 whose GET shows our own change ID on the record = our write landed ->
   mark sent, no resend.
+  **SUPERSEDED by V1:** no GET; our landed write is recognised when its echo arrives with our change_id.
 - `withRecordLock(recordId, fn)` is the only way to open a transaction; it sets an AsyncLocalStorage
   flag and the Salesforce client throws if called while it is set (unit-tested).
 - Per-role Postgres settings: `idle_in_transaction_session_timeout = 5s`, `lock_timeout = 2s`,
@@ -206,6 +209,9 @@ Frontier empty - all Phase 3 decisions made.
 - Conditional update: the worker sends the record version it last saw; if Salesforce's record has
   changed, Salesforce returns `412` and changes nothing. Worker GETs the record (headroom), re-runs D16
   per field, resends only the fields that still win, with the new version.
+- **SUPERSEDED IN PART by V1 (Phase 5):** the version is `sf_seq_contiguous`, not the highest seen; on
+  `412` there is no GET - wait 5 s for webhooks, `replay_record` if still behind, then the guard on exact
+  per-field times. Reason: a GET has no per-field times, and max-seen lets a stale write pass a gap.
 - The write's reply must return the record's new version (assumption), else every follow-up send 412s.
 - The outbox guard stays as a cheap pre-filter; correctness rests on the precondition.
 - Assumption: the brief does not give conditional updates; real Salesforce REST has
@@ -240,6 +246,103 @@ Frontier empty - all Phase 3 decisions made.
 - Beyond log retention (>= 24 h assumed): "modified since" gives current values (`via = reconcile`).
   Beyond that: page "unrecoverable window T1-T2, full scan needed". Never silent.
 - Rejected: durable buffer in front of Postgres (second store, 200 before applied); accept the loss.
+
+## Phase 4 - The data you store (outline item 4)
+
+```
+Already settled: per-field value/updatedAt/source/actor/sequence (D16, D19); history append-only,
+monthly partitions, 13 months then archive (D15); via + superseded (S3b); inbox 7 days (D18);
+outbox one pending row per record, ~500 B/row, ~216 MB after 6 h (D21, D23); sync schema (S4);
+first/last name (S1); heartbeat, watermarks (G3, G4); record version for G1.
+
+Round 1
+  T1  Layout of per-field state (columns / field_state table / JSONB meta) .............. DECIDED (c)
+  T2  Record identity and the contact->customer link .................................... DECIDED (a)
+  T3  Outbox row shape and the "one pending row per record" constraint .................. DECIDED (a)
+  T4  Cleaning up the inbox after 7 days (delete vs daily partitions) ................... DECIDED (b)
+
+Frontier empty. Data section written to docs/data.md.
+```
+
+### T1 - Per-field state layout (DECIDED: c)
+- Typed value columns on the record table, plus one `field_meta` JSONB column keyed by field:
+  `{updatedAt, source, actor, sfSeq, sfValue}`. One row = one lock = one write; loads straight into the
+  apply function's map. The apply function validates the shape (Postgres cannot).
+- `sfValue` (added while writing the section): the last value Salesforce is known to hold for the field,
+  set on webhook apply and on a confirmed send; it is what a D10 revert goes back to.
+- Rejected: 5 columns per field (35 columns on contacts, mapping code, migration per field); a
+  `field_state` table (~30M rows, values as text, pivot on every read, state in two places).
+
+### T2 - Identity and contact->customer link (DECIDED: a)
+- Primary key = the portal UUID, which is also `Portal_Id__c` (D8). `sf_id` (18-char, D9) nullable,
+  unique when set; webhooks look up by it.
+- Contacts carry `customer_id` (FK, NULL while pending) and `customer_sf_id` (always from Salesforce).
+  "Customer pending" = `customer_id IS NULL`; linking runs in batches of 500 (G2b).
+- Rejected: `customer_sf_id` only (no FK guarantee; portal-created customers have no `sf_id` yet).
+
+### T3 - Outbox row (DECIDED: a)
+- One row per record, pending fields merged in `fields jsonb`; columns for `change_id`, `base_version`,
+  `status`, `attempts`, `consecutive_412`, `next_attempt_at`, `created_at`, `claimed_at`, `last_error`.
+- Unique partial index on `record_id` WHERE `status = 'pending'`; saves use INSERT ... ON CONFLICT DO
+  UPDATE to merge. `sending` rows don't count, so an edit during a send starts a new pending row.
+- `sent` rows deleted after 7 days (history keeps every edit).
+- Rejected: one row per field change (3-5x the rows, grouping at send time, breaks the D21 arithmetic).
+
+### T4 - Inbox clean-up (DECIDED: b)
+- One partition per day; drop the oldest nightly. Unique keys include the day:
+  (`event_id`, `received_day`) and (`record_id`, `sequence`, `received_day`).
+- A duplicate arriving on a later day passes the inbox, but the per-field `sequence` rule (D19) rejects its
+  fields; worst case an extra history row marked superseded, never a wrong value.
+- Size: ~18M rows, ~2.7 GB at peak.
+- Rejected: daily DELETE of ~2.6M rows (dead space, vacuum load); keep everything (~140 GB/year).
+
+## Phase 5 - Review of docs/data.md against the brief (scenario walk-through)
+
+```
+Needs a decision (asked one at a time)
+  V1  Record version for the G1 precondition uses max-seen sequence, and the 412 path
+      needs per-field times a GET does not give ........................................ DECIDED (a)
+      Found: with seq 2 (sales city, later) missing and seq 3 (phone) received,
+      sf_version = 3, our older Noida passes the precondition and beats Delhi; the
+      late seq 2 is then rejected by D19. Wrong winner, silently.
+  V2  Portal-created contact under a portal-created customer: AccountId unknown
+      until the customer's create is confirmed .......................................... DECIDED (b)
+  V3  No table of Salesforce users for choosing an owner (assumption 3.4 says
+      "users synced from Salesforce") ................................................... DECIDED (a)
+
+V1 decision (a): store sf_seq_contiguous (highest sequence with no gap below it) next to
+  sf_seq_max; the G1 precondition uses sf_seq_contiguous. On 412: no GET; wait 5 s for in-flight
+  webhooks, then a replay_record job if still behind, then re-run the guard with exact per-field
+  occurredAt and resend. Own write detected by its echo (our change_id). Replaces G1's
+  "GET and re-run D16" step. Rejected: keep max-seen + GET (gap bug stays, LastModifiedDate
+  picks wrong winners); GET + replay on every 412 (2 calls, gap bug stays).
+
+V2 decision (b): at claim, a contact whose customer has no sf_id is pushed back 2 s. When the
+  customer's create reply arrives, its waiting contacts get customer_sf_id (batches of 500). If the
+  customer is rejected, the contact waits and the portal shows "waiting for customer: rejected by
+  Salesforce". Rejected: reference by Account.Portal_Id__c (new assumption, still needs a retry on
+  "parent not found"); send unlinked then link (2 calls, orphan contact visible to sales).
+
+V3 decision (a): sync.sf_users (sf_user_id, email, name, active, synced_at), refreshed hourly by one
+  "list active users" query (assumption 3.14), unknown owner IDs fetched by a fetch_user job; the portal
+  validates owner against active users before saving. Described, not built this weekend; demo seeds a
+  few users. Rejected: no table (bad owner becomes a Salesforce rejection, raw IDs shown, assumption 3.4
+  false); owner read-only in the portal (brief lets both sides update owner).
+
+Frontier empty. All other sections aligned with data.md in the same pass.
+
+Small fixes, no decision needed (APPLIED to data.md with V1)
+  V4  actor: the brief gives emails (changedBy / editedBy), not IDs; store the email
+  V5  sf_id char(18) pads the brief's sample IDs; use text, unique when set
+  V6  outbox change_id set when the pending row is created (merges keep it, frozen on
+      claim), so history.change_id is known at save; unique index for echo lookup
+  V7  drop outbox.op; choose at claim: sf_id known -> conditional update, else upsert
+  V8  unknown recordId with sequence 1 is a create carrying all fields: no fetch;
+      unknown with sequence > 1 is S3 (partial + fetch)
+
+Other sections to align after V1-V8: systems.md 2.5 (sample keys/changedBy), 2.6 (412),
+CLAUDE.md rule 7, subproblems 3, assumptions 3.3/3.8, decisions G1 and S3.
+```
 
 ## Decisions
 

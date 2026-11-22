@@ -40,15 +40,25 @@ unsaved one (D23). The costs we accepted, and the rules that contain them:
    after the commit.
 6. **Postgres timeouts per role:** `idle_in_transaction_session_timeout = 5s`, `lock_timeout = 2s`,
    `statement_timeout = 5s`. Migrations use their own role with a `lock_timeout`.
-7. **Every update to Salesforce is conditional** on the record version we last saw. On `412`: GET the
-   record; if its `Portal_Change_Id__c` is ours, our write already landed; otherwise re-run the
-   conflict rule per field and resend only the winners. Never retry a lost field automatically; the
-   user overrides with "Use my value again".
+7. **Every update to Salesforce is conditional on `sf_seq_contiguous`** (the highest sequence with no
+   gap below it), never on `sf_seq_max`: a missing webhook below our version must cause a `412`, not a
+   stale write. On `412`: no GET. Wait 5 s for in-flight webhooks; if `sf_seq_contiguous` has not
+   passed `base_version`, run a `replay_record` job; then re-run the guard on exact per-field times and
+   resend only the winners. Our own landed write is recognised by its echo's `change_id`. Never retry a
+   lost field automatically; the user overrides with "Use my value again".
 8. **Replay restarts from a heartbeat minus an overlap**, never from "the last `eventId` we applied"
    (webhooks arrive out of order).
+9. **A contact is never sent before its customer has an `sf_id`**; the claim pushes it back 2 s.
 
 ## Other fixed rules
 
 - Only one sync worker is active at a time (Postgres advisory lock, standby takes over). The rate
   limiter is in memory; do not scale the worker horizontally without a shared limiter.
 - Contact full name is stored as `first_name` / `last_name` (Salesforce `Contact.Name` is read-only).
+- **`history` is append-only:** insert, never update or delete (old partitions are archived, not
+  deleted). `superseded` is set at insert time by the apply rule.
+- **`field_meta` (JSONB) has no database-enforced shape:** only the apply function writes it, and it
+  validates `{updatedAt, source, actor, sfSeq, sfValue}` for every field. Table layouts are in
+  `docs/data.md`.
+- **At most one pending outbox row per record**, enforced by a unique partial index; merge with
+  `INSERT ... ON CONFLICT ... DO UPDATE`, never a second pending row.

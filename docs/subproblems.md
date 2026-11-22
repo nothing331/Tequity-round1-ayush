@@ -69,7 +69,8 @@ next, and standard plumbing comes last.
   - **Merging:** each record has at most one pending row, and a new edit updates it. A row being sent is locked, so edits arriving meanwhile go to a new row.
   - **Sending:** the worker sends to a **fake Salesforce**. Creates are upserts on `Portal_Id__c`, and every write carries `Portal_Change_Id__c`.
   - **Confirmation:** the API reply is the confirmation, and it returns the record's new version.
-  - **Conditional update (G1):** every update carries the record version we last saw. A `412` leads to a GET, then the conflict rule per field, then a resend of only the winning fields. If the GET shows our own `Portal_Change_Id__c`, our earlier attempt landed.
+  - **Conditional update (G1, V1):** every update carries `sf_seq_contiguous`, the highest sequence with no gap below it. A `412` means Salesforce has events we haven't applied. The row waits 5 s for in-flight webhooks, runs a `replay_record` job if it's still behind, then re-runs the guard on exact per-field times and resends only the winning fields. There's no GET. If our earlier attempt landed, its echo arrives with our `change_id`.
+  - **Create or update at claim time (V7):** an upsert on `Portal_Id__c` if there's no `sf_id`, otherwise a conditional update. A contact whose customer has no `sf_id` waits (V2).
   - **Three-step send (G2b):** claim (transaction), HTTP call (no transaction), store result (transaction). The Salesforce client throws if it is called inside `withRecordLock`.
 - **Why third:** the next biggest risk is duplicates in Salesforce and loops. Every outbound feature depends on it.
 - **Rules:**
@@ -83,6 +84,8 @@ next, and standard plumbing comes last.
   - a queued older portal value doesn't overwrite a newer Salesforce value
   - **a sales edit that lands in Salesforce after our guard check but before our send gets a `412`, and both sides end on the later value** (G1)
   - calling the Salesforce client inside `withRecordLock` throws (G2b)
+  - **with seq 2 missing and seq 3 received, our send carries version 1 and gets a `412`, not a stale write** (V1)
+  - a contact created with its new customer is sent only after the customer's create is confirmed (V2)
 
 ## 4. Rate limiter, 429 handling, circuit breaker, surviving a restart
 
@@ -157,6 +160,8 @@ next, and standard plumbing comes last.
 | A pending call still there after a restart while the fake Salesforce is down | 3 (outbox), 4 (breaker, restart) | 4 |
 
 ## Not in the build list
+
+- **The Salesforce users table (V3):** described in data.md 4.8. The demo seeds a few users.
 
 - **Metrics and alerts (D24):** described in the design document (three numbers, with the red line at the brief's 30 s). Not built this weekend.
 - **Initial 5M-record bulk load (D13):** assumed to run through Salesforce's bulk file API before go-live. Out of scope.
