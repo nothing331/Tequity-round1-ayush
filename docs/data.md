@@ -171,6 +171,10 @@ sync.outbox
   consecutive_412  int                  -- back off after 5 (G1b)
   next_attempt_at  timestamptz          -- when a pending row may be claimed, or a sending row retried
   created_at       timestamptz          -- picks the lane after an outage (D21)
+  age_from         timestamptz          -- start of the 30 s clock for metric 1; = created_at, reset when a
+                                        --   blocked contact becomes eligible to send (R1)
+  blocked_by       text NULL            -- 'rejected_customer' while parked behind a rejected customer
+                                        --   create; excluded from metric 1 (R1)
   last_error       text NULL
 ```
 
@@ -223,7 +227,7 @@ sync.jobs
 | `fetch_record` | A webhook for an unknown record with **sequence > 1**, so we only have some of its fields (S3). An unknown record with **sequence 1** is a create carrying every field: we insert it, and no fetch is needed (V8) |
 | `replay_record` | A sequence gap is still unfilled after 10 s (D19), or an outbox row got a `412` and `sf_seq_contiguous` hasn't caught up (V1) |
 | `fetch_user` | A webhook carries an owner ID not in `sync.sf_users` (V3) |
-| `link_contacts` | A customer's `sf_id` is set, by any path. Copies it into its contacts' `customer_sf_id` and wakes their parked outbox rows, in batches of 500 (O3′). Makes no Salesforce call |
+| `link_contacts` | A customer's `sf_id` is set, by any path. Copies it into its contacts' `customer_sf_id` and wakes their parked outbox rows, in batches of 500 (O3′): `next_attempt_at = now()`, and for rows with `blocked_by` set, `blocked_by = NULL`, `age_from = now()` (R1). Makes no Salesforce call |
 
 Finished jobs are deleted after 1 day. They use the 20 req/s headroom, never the 80 req/s outbox share.
 

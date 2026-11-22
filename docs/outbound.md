@@ -163,7 +163,7 @@ Salesforce rejects a whole update when one field fails validation.
 | **Update rejected, the error names fields** | For each named field: **revert to `sfValue` only if `field_meta[f].editId` still equals the row's `editId`** (no newer save, even one with the same value). Add a history note row: "edit h18 rejected by Salesforce: reason". Then **resend once** with the remaining fields that pass the guard: `content_gen` + 1, new key, `base_version` = current `sf_seq_contiguous` |
 | **Update rejected, no field named** | Same editId check and revert for **every** field in the call. No resend |
 | **The resend is rejected too** | Revert what remains (same editId check). Row → `rejected`. **No third attempt** |
-| **Create rejected** | **No revert**: `sfValue` is NULL for a record Salesforce never had, and reverting would wipe the user's fields. Row → `rejected`. The portal shows "not in Salesforce: reason". The next save creates a new pending row, and its upsert carries the **full current record** (6.3) |
+| **Create rejected** | **No revert**: `sfValue` is NULL for a record Salesforce never had, and reverting would wipe the user's fields. Row → `rejected`. The portal shows "not in Salesforce: reason". For a customer, its contacts' parked rows get `blocked_by = 'rejected_customer'`, which leaves them out of metric 1 (R1, metrics.md 11.2). The next save creates a new pending row, and its upsert carries the **full current record** (6.3) |
 
 The reverted value is written as a history row noted "reverted: rejected by Salesforce", with
 `source = salesforce`, `actor` = the Salesforce value's original actor, and a new `editId`.
@@ -174,7 +174,7 @@ The reverted value is written as a history row noted "reverted: rejected by Sale
 |---|---|
 | A contact's row needs an `AccountId` and the customer has no `sf_id` | The row is parked (6.3). The portal shows "waiting for customer" (or "… rejected by Salesforce" if the customer's create was rejected) |
 | **Anything sets the customer's `sf_id`**: the create reply, the webhook adopting the row (inbound.md 5.3), or a fetch | That transaction queues a `link_contacts` job |
-| `link_contacts` runs | Copies the `sf_id` into `customer_sf_id` on the customer's contacts, and sets `next_attempt_at = now()` on their parked rows. Batches of 500, each its own transaction (G2b) |
+| `link_contacts` runs | Copies the `sf_id` into `customer_sf_id` on the customer's contacts, and sets `next_attempt_at = now()` on their parked rows. Rows that were blocked by a rejected customer also get `blocked_by = NULL` and `age_from = now()`, so their 30-second clock starts now (R1). Batches of 500, each its own transaction (G2b) |
 | The contact's row is claimed | `AccountId` = `customers.sf_id`, read at claim time |
 
 Which path sets the `sf_id` first doesn't matter. The late one finds the same value and changes nothing (I2).

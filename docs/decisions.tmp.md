@@ -508,6 +508,42 @@ Decisions (after the user's worked-case review)
        genuinely older event has a sequence not in history and is recorded as superseded.
 ```
 
+## Phase 9 - Three numbers to watch (outline item 11)
+
+```
+User's three: (1) oldest unconfirmed portal edit, (2) Salesforce-to-portal delay,
+(3) Salesforce API failure rate. Same shape as D24 M1-M3; "unconfirmed" is better than
+D24's "unsent" because it also covers a 'sending' row still waiting for evidence (O1').
+Thresholds carried over: M1 > 30 s while the breaker is closed (fresh lane during catch-up,
+Q10b), breaker open > 5 min; M2 p95 > 30 s or a gap unfilled after 10 min; M3 > 5% or
+4xx > 1% over 5 min.
+
+Round 1 - refinements found by testing each number against later decisions
+  R1  M1 would page forever on a contact parked behind a rejected customer (O3') ......... DECIDED (a)
+  R2  M2 goes silent if webhooks stop arriving: no samples, no page ................... DECIDED (a)
+  R3  M3 counts what? 412s (normal under conflict, G1), 429s, and calls while the
+      breaker is open would all inflate or duplicate it ................................. DECIDED (a)
+
+Decisions (user's wording):
+  R1  Exclude a contact's row from M1 only while it's blocked by a customer create that
+      Salesforce rejected; the rejection stays visible in the portal. When the customer gets
+      its sf_id (the row is eligible to send again), the row's 30 s timer starts from then.
+      Stored as outbox.blocked_by = 'rejected_customer' (set when the customer's create is
+      rejected) and outbox.age_from (reset by link_contacts when it wakes the row).
+  R2  Keep the delay and gap alerts. Also page when two consecutive successful sweeps each
+      find at least one Salesforce change the webhook path missed. One miss is repaired and
+      recorded by the sweep (via reconcile); the page is for repeated misses. A fallback with
+      a roughly 10-minute detection window. A change counts as missed only if it was made
+      more than 60 s before the sweep read it (so a webhook still in flight isn't a miss).
+  R3  Over 5 minutes, page when more than 5% of API attempts fail with a timeout, 5xx, or a
+      4xx other than 412 or 429; retries count in the total. Separate 1% threshold for
+      validation or permission rejections. 412 and 429 tracked separately. Not evaluated
+      while the breaker is open; outage probes excluded after it closes. Sustained throttling
+      is caught by M1 in normal operation or the drain-stall page during recovery.
+
+Frontier empty. Section written to docs/metrics.md.
+```
+
 ## Decisions
 
 ### D1 - Peak and quiet edit rates - DECIDED
@@ -695,6 +731,9 @@ Riskiest rules first (inside out):
 ### D24 - Three numbers to watch - DECIDED
 - User decision: the red line follows the brief's 30 s worst case, not a looser 120 s.
 - M1 Oldest unsent portal change (outbox age): page when > 30 s while Salesforce is reachable.
+  **REFINED by Phase 9 (R1-R3):** M1 = oldest unconfirmed edit (pending or sending), excluding rows blocked
+  by a rejected customer create; M2 gains the two-sweep fallback; M3 counts only timeouts, 5xx and 4xx
+  other than 412/429 (docs/metrics.md).
   **REFINED by Q10b (Phase 8):** during catch-up M1 counts fresh-lane rows only and re-arms when their age
   first drops below 30 s, or 15 min after recovery; plus a drain-stall page (outage.md 10.6).
   Separate outage alert: circuit breaker open > 5 min (30 s does not apply during an outage, per the brief).
