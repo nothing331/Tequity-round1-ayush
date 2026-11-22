@@ -46,8 +46,10 @@ unsaved one (D23). The costs we accepted, and the rules that contain them:
    passed `base_version`, run a `replay_record` job; then re-run the guard on exact per-field times and
    resend only the winners. Our own landed write is recognised by an event carrying its key `ob_<id>.<content_gen>`. Never retry a
    lost field automatically; the user overrides with "Use my value again".
-8. **Replay restarts from a heartbeat minus an overlap**, never from "the last `eventId` we applied"
-   (webhooks arrive out of order).
+8. **Replay restarts from the oldest completed sweep watermark minus 10 minutes**, never from "the last
+   `eventId` we applied" (webhooks arrive out of order) and never from the heartbeat (it keeps beating
+   during a Salesforce outage). A sweep watermark advances only after a run's last page is applied, or
+   when a replay completes; a missing watermark means "replay from the retention limit" and pages (Q10a).
 9. **A contact is never sent before its customer has an `sf_id`**; the claim parks it, and
    `link_contacts` (queued by whatever sets the customer's `sf_id`) wakes it.
 10. **At most one `sending` outbox row per record** (unique partial index). A `sending` row's content

@@ -81,8 +81,8 @@ Only rows in Postgres:
 | per-field state on records | receiver, worker, portal backend | all three | The worker's guard drops a queued field that a newer Salesforce value has already won (D16) |
 | history | all three | portal UI | Who changed what, when, and how it reached us (`via`, S3b) |
 | `sync.inbox` | receiver | receiver | Duplicate removal by `eventId` and (recordId, sequence), kept 7 days (D18) |
-| `sync.heartbeat` | receiver | worker | Last time the receiver could write. After a database outage, replay starts here minus 10 minutes (G4) |
-| `sync.watermarks` | worker | worker | The reconciliation sweep's "modified since" point (G3) |
+| `sync.heartbeat` | receiver | worker | Last time each receiver could write. A diagnostic only; the replay start comes from the sweep watermarks (Q10a) |
+| `sync.watermarks` | worker | worker | The reconciliation sweep's "modified since" point (G3), and the replay start after any outage: the oldest of the two, minus 10 minutes (Q10a) |
 | `sync.sf_users` | worker | portal backend, receiver | Salesforce users who can be an owner, so the portal checks an owner before saving (V3) |
 
 Full columns, indexes and sizes for every table are in [data.md](data.md).
@@ -189,7 +189,7 @@ per request. Batching is not assumed.
 | **Conditional update by record ID** | A record with an `sf_id` | Sends only the changed fields plus `Portal_Change_Id__c`, **only if the record is still at `sf_seq_contiguous`**, the highest sequence with no gap below it (G1, V1). The reply is the confirmation and returns the new version (D9) |
 | **GET one record** | Missing customer (D14), unknown record with sequence > 1 (S3, V8) | The reply includes `sequence`, `LastModifiedDate` and the last modifier's email (assumption 3.8). **Not used after a `412`** (V1) |
 | **List active users** | Hourly refresh of `sync.sf_users`, plus unknown owner IDs (V3) | About 1 call an hour from the headroom (assumption 3.14). Described, not built this weekend |
-| **Change-log replay**: events from a point in time, 2,000 per page | After any outage, Salesforce's or ours: from the last heartbeat minus 10 minutes (G4). Also a per-record gap (D19) | Duplicates from the overlap are dropped by the inbox and `sequence` |
+| **Change-log replay**: events from a point in time, 2,000 per page | After any outage, Salesforce's or ours: from the oldest completed sweep watermark minus 10 minutes (Q10a, outage.md 10.3). Also a per-record gap (D19) | Duplicates from the overlap are dropped by the inbox and `sequence` |
 | **Records modified since T**: the 10 fields, 2,000 per page | The 5-minute reconciliation sweep (G3); the replay fallback (D3) | About 5 calls per object every 5 minutes at peak. Applied through the normal rule (`via = reconcile`) |
 | **OAuth token** (login endpoint) | JWT bearer exchange | About 1 call/hour, assumed outside the cap (S5) |
 
@@ -239,7 +239,7 @@ puts city on the contact (assumptions, question 11).
 | Webhook receiver | Restarted by the health check in about 30–60 s. Salesforce retries in the meantime and nothing is lost. **M2 (webhook delay p95 > 30 s) is the trigger to run two copies** | Stateless: add copies behind the load balancer |
 | Sync worker | The standby takes the advisory lock. If the active worker hangs, its heartbeat stops and the health check kills it, freeing the lock. Pending work is in the outbox, so nothing is lost | Not needed: Salesforce's cap, not our CPU, is the limit. Several workers would need a shared rate limiter |
 | Portal backend | As today. Edits are saved with their outbox row, or not saved at all | As today |
-| Postgres | Everything stops accepting writes, and the portal is down too, so no portal edits are made. Webhooks get `503`. On recovery, the worker replays from the last heartbeat minus 10 minutes (G4). Beyond the log's retention: "modified since". Beyond that: a page, "unrecoverable window T1–T2, full scan needed" | One primary is enough at 50 edits/s. A replica for failover is out of scope this weekend |
+| Postgres | Everything stops accepting writes, and the portal is down too, so no portal edits are made. Webhooks get `503`. On recovery, the worker replays from the oldest completed sweep watermark minus 10 minutes (Q10a). Beyond the log's retention: "modified since". Beyond that: a page, "unrecoverable window T1–T2, full scan needed" | One primary is enough at 50 edits/s. A replica for failover is out of scope this weekend |
 | Salesforce API | Breaker opens and the outbox grows (about 216 MB over 6 h). Replay first, then drain (D11, D21) | — |
 
 ## 2.9 What we assume from Salesforce, and the fallback if it is missing (G3)

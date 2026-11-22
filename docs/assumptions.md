@@ -30,7 +30,7 @@ The brief asks for this section at the top of the design document. Each entry ha
 ### 1.3 Changes made during the 6-hour outage (D3)
 - **Question:** Can we ask Salesforce for the records that changed during the 6 hours, or are those changes gone unless we already have them?
 - **Assumption:**
-  - Salesforce keeps a **replayable change log**: "give me every event from time T". We replay from the last receiver heartbeat before the outage minus a 10-minute overlap, not from "the last `eventId` we applied", because webhooks arrive out of order (G4).
+  - Salesforce keeps a **replayable change log**: "give me every event from time T". We replay from the oldest completed sweep watermark minus a 10-minute overlap (Q10a, outage.md 10.3), not from "the last `eventId` we applied", because webhooks arrive out of order. Each change-log event lists its own changed fields (this is what lets a replayed event confirm an uncertain send, loop.md 9.5).
   - The log is kept for **at least 24 h**.
   - Each request returns a page of **2,000 events**.
   - **Fallback (worst case):** if the log has expired, query records modified since the outage began.
@@ -220,6 +220,11 @@ The brief asks for this section at the top of the design document. Each entry ha
 
 ---
 
+### 4.5 How fast we apply events
+- **Question (for us, not the client):** how many replayed or webhook events per second can we apply?
+- **Assumption:** about **2,500 events/s**: 4 appliers split by record (so one record's events stay in order), about 1.6 ms per event each. To be measured in the demo.
+- **If the answer goes the other way:** applying the 675,000 replayed events takes 675,000 ÷ rate. At 1,000 events/s that's 11 min instead of 4.5, and the end-to-end recovery grows by the same amount; the rate-limit figure of 122 min doesn't change.
+
 ## 5. Numbers used in the arithmetic
 
 | Quantity | Value | Source |
@@ -233,9 +238,12 @@ The brief asks for this section at the top of the design document. Each entry ha
 | Ramp after recovery | 20 req/s (minute 1) → 40 (minute 2) → 80 | D11 |
 | Outage length | 6 h = 21,600 s | brief |
 | Portal backlog after the outage | 20 × 21,600 = **432,000 calls** | derived |
-| Salesforce events to replay | 30 × 21,600 = 648,000 → ÷ 2,000 per page = **324 calls** | assumption 1.3 |
-| Drain time, worst case | 60T = 438,324 → T ≈ 7,305 s ≈ **122 min** | D21 |
-| Drain time, 50% merged (guess) | 60T = 222,000 → T ≈ 3,700 s ≈ **62 min** | D21 |
+| Salesforce events in the six-hour window alone (before adding the overlap) | 30 × 21,600 = 648,000 → ÷ 2,000 = 324 calls | assumption 1.3 |
+| Salesforce events to replay (window + up to 15 min before it) | 30 × 22,500 = 675,000 → ÷ 2,000 per page = **338 calls** | Q10a |
+| Drain time at the rate limit, worst case | 60T = 438,338 → T ≈ 7,305.6 s ≈ **122 min** | D21, Q10a |
+| Drain time, 50% merged (guess) | 60T = 222,338 → T ≈ 3,705.6 s ≈ **62 min** | D21 |
+| Applying the replay | 675,000 ÷ 2,500/s ≈ 270 s ≈ 4.5 min | assumption 4.5 |
+| End to end, replay applied first | 270 s + 7,390 s = 7,660 s ≈ **128 min** | outage.md 10.5 |
 | Outbox on disk after the outage | ~432,000 × 500 B ≈ **216 MB** (less with merging) | D21 |
 | Sync target while both sides are up | 30 s worst case | brief |
 
@@ -243,11 +251,12 @@ How the drain time is computed:
 
 ```
 sent(T)   = 1,200 + 2,400 + 80 x (T - 120) = 80T - 6,000   (ramp, then 80 req/s)
-needed(T) = 432,000 + 20T                                    (backlog + new edits)
-80T - 6,000 = 432,000 + 20T  ->  60T = 438,000  ->  T = 7,300 s ~ 122 min
+needed(T) = 432,000 + 338 + 20T                              (backlog + replay calls + new edits)
+80T - 6,000 = 432,338 + 20T  ->  60T = 438,338  ->  T = 7,305.6 s ~ 122 min
 ```
 
-Replaying first takes 324 of minute 1's 1,200 calls, so the sum becomes 60T = 438,324, T ≈ 7,305 s, still about 122 min.
+The 122 minutes counts the replay's calls against the rate limit but not the ~270 s it takes to apply the replayed
+events. With the replay applied strictly first, the end-to-end time is about 128 minutes (outage.md 10.5).
 
 ---
 

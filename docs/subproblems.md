@@ -114,15 +114,21 @@ next, and standard plumbing comes last.
 ## 5. Outage catch-up
 
 - **What:** after the breaker closes, or after our own database comes back:
-  1. **Replay Salesforce's change log first:** from the last receiver heartbeat before the outage minus a 10-minute overlap (G4), falling back to "modified since T". Not from "the last `eventId` we applied", because webhooks arrive out of order. The overlap's duplicates are dropped by the inbox and `sequence`.
+  1. **Replay Salesforce's change log first:** from the oldest completed sweep watermark (customers, contacts) minus a 10-minute overlap (Q10a, outage.md 10.3), falling back to "modified since T". A completed replay advances both watermarks. Not from "the last `eventId` we applied", because webhooks arrive out of order. The overlap's duplicates are dropped by the inbox and `sequence`.
   2. **Then drain** with a ramp of 20 → 40 → 80 req/s, split **50/50 between fresh edits and the backlog, each borrowing the other's unused share**. The lane comes from `created_at` against the recovery time.
-- **Why fifth:** it builds on 3 and 4. Replaying first is what stops an older queued portal value overwriting a newer sales edit made during the outage.
-- **Decisions:** D3, D11, D21, G4.
+- **Why fifth:** it builds on 3 and 4. Replaying first lets the guard drop an older queued portal value before any call; the conditional update would also catch it, so replay-first now saves a flood of `412`s (V1).
+- **Decisions:** D3, D11, D21, G4, Q10a, Q10b.
 - **Arithmetic it must reproduce (scaled down in a demo):**
   - **Backlog:** 432,000 calls.
-  - **Replay:** 324 calls, plus 9 for the 10-minute overlap (30 edits/s × 600 s ÷ 2,000). The drain stays at about 122 min (60T = 438,333).
-  - **Drain:** 60T = 438,324, so about **122 min** in the worst case, or about 62 min if 50% merged.
-- **Done when:** after a simulated outage, replay finishes before the first outbound call. Fresh edits sync in under 30 s once the ramp ends. The backlog drains in the time the formula predicts for the configured cap.
+  - **Replay:** 338 calls: 30 events/s × (21,600 + 900) s = 675,000 events ÷ 2,000. (The six-hour window alone, before adding the overlap, is 324.)
+  - **Drain:** 60T = 438,338, so about **122 min** at the rate limit in the worst case, or about 62 min if 50% merged (60T = 222,338). End to end, with the ~270 s it takes to apply the replay first, about 128 min.
+- **Done when:**
+  - after a simulated outage, replay finishes before the first outbound call
+  - a sweep that fails halfway leaves its watermark unchanged, and the replay starts at the older watermark minus 10 minutes
+  - a missing watermark makes the replay start at the retention limit and raises a page
+  - fresh edits are back under 30 s (M1 re-armed) by about 11.5 minutes after recovery, scaled to the demo's cap
+  - a backlog that stops shrinking triggers the drain-stall page within the 5-minute window rule
+  - the backlog drains in the time the formula predicts for the configured cap
 
 ## 6. Webhook endpoint wrapper
 
@@ -151,7 +157,9 @@ next, and standard plumbing comes last.
 | Gap in the sequence | Apply the newer event and log the gap. If the missing one hasn't arrived within 10 s, replay that record from the change log | D19 |
 | Overwritten finance edit | Badge on the field, built from history: "replaced by <actor> in Salesforce at <time>", with a "Use my value again" button that sends a normal PATCH with `baseUpdatedAt` | D16, G1b |
 | Reconciliation sweep | Every 5 min, "records modified since the watermark minus an overlap", each record through the normal apply rule (`via = reconcile`). Catches webhooks missed by any path | G3 |
-| Database outage recovery | After Postgres returns, replay from the last heartbeat minus 10 minutes. Beyond the log's retention, "modified since". Beyond that, page "unrecoverable window" | G4 |
+| Database outage recovery | After Postgres returns, replay from the oldest completed sweep watermark minus 10 minutes. Beyond the log's retention, "modified since". Beyond that, page "unrecoverable window" | G4, Q10a |
+| Duplicate past the inbox | When every field loses the sequence check and history already has the `event_id` or `sf_seq`, write nothing | Q8 |
+| Full-record webhooks | No echo rules from a snapshot; equal values are no-ops; a snapshot never confirms an uncertain send | Q9 |
 
 - **Why last:** each is small and depends on 1–5.
 

@@ -57,7 +57,7 @@ decides.
 | a | Not a field we sync (e.g. `Description`) | unchanged; logged | unchanged | none |
 | b | **Echo**, and the value is exactly what that row's content version sent (`fields[f].value`) (I1) | **unchanged**: the field keeps the portal save's time and actor | moved forward to this sequence and value **only if this sequence is newer** | none: the portal save already wrote one |
 | c | **Echo**, but Salesforce changed our value, e.g. reformatted a phone (I1, D17) | judged by rows d–f like any Salesforce change | as rows d–f | as rows d–f, noted "normalised by Salesforce" |
-| d | `event.sequence <= sfSeq` (an **older or repeated** event, D19) | unchanged | unchanged | yes, `superseded = true` |
+| d | `event.sequence <= sfSeq` (an **older or repeated** event, D19) | unchanged | unchanged | yes, `superseded = true`, **unless every field of the event lost here and this record's history already has its `event_id` or `sf_seq`**: then it's a duplicate and nothing is written (Q8, ordering.md 8.1) |
 | e | `occurredAt < updatedAt`: the portal value is **newer** (D16) | unchanged: the portal value stays and its outbox row will send it | set: Salesforce does hold this value right now | yes, `superseded = true` |
 | f | Otherwise, including an exact time tie, which Salesforce wins (D16) | value = new value, `updatedAt = occurredAt`, `source = salesforce`, `actor = changedBy`, `editId` = this history row's `id` (so a queued portal edit of this field fails the outbound guard, O1′) | set | yes, `superseded = false` |
 
@@ -66,6 +66,10 @@ decides.
 - **"Set" always means "move forward only".** `sfSeq` and `sfValue` change only when this event's sequence is
   higher than the stored one. The worker's `2xx` reply follows the same rule, so neither a late echo nor a
   late reply can move anything backwards (I1).
+- **Full-record webhooks** (the other case, Q9): echo rows b and c are never used, because a snapshot can't prove
+  our key belongs to this event. A field equal to our current value is a no-op (only `sfSeq` and `sfValue` move
+  forward); a different value goes through rows d–f with `actor = changedBy`. A snapshot never confirms an
+  uncertain send (loop.md 9.5).
 - **Other fields in the same event** are judged separately. An old event's change to a field nobody has
   touched since still lands (D19).
 - **The `Portal_Id__c` and `Portal_Change_Id__c` keys** are used to find our own row (5.3) and to recognise
@@ -174,4 +178,4 @@ Steps 1–2 (signature and body checks) belong to the receiver alone.
 | A duplicate webhook | Step 3 (inbox), backed up by row d |
 | An older webhook after a newer one | Row d (per-field `sequence`), plus the 5.4 gap replay |
 | Our own update coming back (sync loop) | Rows b and c. The webhook path **never writes to the outbox** (D17) |
-| Webhooks lost during the 6-hour outage | 5.7 replay from the heartbeat minus 10 minutes (G4) |
+| Webhooks lost during the 6-hour outage | 5.7 replay from the oldest completed sweep watermark minus 10 minutes (Q10a, outage.md 10.3) |

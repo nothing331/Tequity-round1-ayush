@@ -126,6 +126,9 @@ history                                   -- PARTITION BY RANGE (recorded_at), o
   is what keeps the table append-only.
 - **Retention:** 13 monthly partitions in Postgres. Older ones are detached and archived to object storage,
   never deleted. About 200 B per row, about 0.9 GB per day at peak, and about 65–80 GB in Postgres in total.
+- **Duplicate check on the rare path** (Q8): when every field of an event loses the sequence check, the apply
+  step looks for a row of this record with the same `event_id` or `sf_seq`; if found, nothing is written. It uses
+  the `(record_id, recorded_at)` index; one record's history is small.
 - **The UI badge** (D16, G1b) is a query on this table: the latest rows for a field, compared by
   `occurred_at`.
 
@@ -224,16 +227,21 @@ sync.jobs
 
 Finished jobs are deleted after 1 day. They use the 20 req/s headroom, never the 80 req/s outbox share.
 
-## 4.7 `sync.heartbeat` and `sync.watermarks` (G3, G4)
+## 4.7 `sync.heartbeat` and `sync.watermarks` (G3, G4, Q10a)
 
 ```
 sync.heartbeat    receiver_id text PK, beat_at timestamptz        -- updated every 5 s by each receiver
 sync.watermarks   name text PK, value timestamptz                 -- 'sweep:customers', 'sweep:contacts'
 ```
 
-- **After a database outage**, the worker replays the change log from `min(beat_at)` taken just before the
-  outage, minus 10 minutes (G4).
-- **The sweep** reads records modified since `value` minus an overlap, then advances `value` (G3).
+- **The replay start after any outage** (Salesforce's or our database's) is the **oldest** of the two sweep
+  watermarks minus 10 minutes (Q10a, outage.md 10.3). A missing watermark means "replay from the change log's
+  retention limit" and pages.
+- **A sweep watermark advances only** when a sweep run has applied its last page (to that run's start time), or
+  when a change-log replay completes (both, to the replay's start time). A failed or interrupted run leaves it
+  unchanged. The run reads "modified since `value` − 2 min" (G3).
+- **The heartbeat is a diagnostic only** (when each receiver last could write). It no longer sets the replay
+  start: it keeps beating during a Salesforce outage (Q10a supersedes G4 here).
 - A heartbeat is a timer write, not a write per webhook, so 30 webhooks/s never queue up on one row.
 
 ## 4.8 `sync.sf_users` (V3, assumption 3.4)

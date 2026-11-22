@@ -243,6 +243,8 @@ Frontier empty - all Phase 3 decisions made.
 - The receiver writes a heartbeat row. After any database outage the worker replays the change log
   from the last heartbeat before the outage minus a 10-minute overlap; inbox + sequence drop what we
   already have. This replaces D3's unsafe "after the last eventId we applied" cursor everywhere.
+  **SUPERSEDED as the replay start by Q10a (Phase 8):** the oldest completed sweep watermark minus 10 min,
+  for any outage. A heartbeat keeps beating during a Salesforce outage, so it can't mark where one began.
 - Beyond log retention (>= 24 h assumed): "modified since" gives current values (`via = reconcile`).
   Beyond that: page "unrecoverable window T1-T2, full scan needed". Never silent.
 - Rejected: durable buffer in front of Postgres (second store, 200 before applied); accept the loss.
@@ -454,6 +456,58 @@ Frontier empty. Section written to docs/outbound.md.
 
 ```
 
+## Phase 8 - Items 7-10 (conflicts, ordering, loop, outage), written in one go
+
+```
+Sections written: docs/conflicts.md (7), docs/ordering.md (8), docs/loop.md (9), docs/outage.md (10).
+Questions found while writing (marked "pending" in the files):
+  Q8   A later-day duplicate (past the inbox) writes an extra superseded history row ......... DECIDED
+       Proposal: when every field of an event loses the sequence check, look for the same
+       event_id in that record's history first; if found, write nothing.
+  Q9   Full-record webhooks (the brief's "other case"): Portal_Change_Id__c is on every
+       event after our write, so a sales edit would look like our echo ................... DECIDED (revised)
+       Proposal: echo only if the key matches an outbox row AND changedBy is the
+       integration user.
+  Q10a Replay start after a SALESFORCE outage: G4's heartbeat keeps beating (our DB is
+       fine), so "last heartbeat minus 10 min" starts the replay at recovery, missing
+       the whole window. The breaker opens late in a quiet hour ..................... DECIDED
+       Proposal: start at the sweep watermark minus 10 min (at most 5 min stale);
+       replay = 30 x (21,600 + 900) = 675,000 events / 2,000 = 338 calls; drain still
+       ~122 min (60T = 438,338).
+  Q10b M1 (oldest unsent > 30 s) would page for the whole 2-hour drain ................ DECIDED
+       Proposal: during catch-up M1 counts fresh-lane rows only; separate page if the
+       backlog drains > 25% slower than the formula.
+
+Decisions (after the user's worked-case review)
+  Q10a Replay start for ANY outage = the oldest completed sweep watermark (customers,
+       contacts) minus 10 min. A watermark advances only when a sweep run has applied its
+       last page (to that run's start time), or when a change-log replay completes (both
+       watermarks to the replay's start time). A failed or interrupted run leaves it
+       unchanged. A missing watermark: replay from the log's retention limit (now - 24 h),
+       page "sweep watermark missing", and that object's next sweep starts there.
+       Supersedes G4's heartbeat as the replay start (the sweep can't complete during a
+       database outage either); the heartbeat stays as a diagnostic only.
+       Estimate kept at 338 replay calls (675,000 events, 5-min sweep assumption).
+       Fetch ~68 s (latency-bound), apply ~270 s at an assumed 2,500 events/s; the
+       ~122-min figure counts the 338 calls against the rate limit but not the apply time;
+       end-to-end with replay strictly first ~128 min.
+  Q10b M1 during catch-up counts fresh-lane rows only, and is re-armed when the fresh-lane
+       age first drops below 30 s after recovery, or 15 min after recovery, whichever is
+       first (predicted ~11.5 min). Drain-stall rule: every minute, if the backlog shrank
+       less than 75% of (allowed sends - fresh-lane sends) over the last 5 minutes while the
+       breaker is closed, page. A backlog that stops shrinking 10 min into the drain pages at
+       minute 12.
+  Q9   A full snapshot cannot prove the key belongs to this event. In snapshot mode: never
+       apply the echo rules from a snapshot; a field equal to our current value is a no-op
+       (only sfSeq/sfValue move forward); a different value is a normal Salesforce change
+       (rows d-f, actor = changedBy). A snapshot never confirms an uncertain send; those
+       resolve by the reply, a change-log event listing the key among its changed fields,
+       or the G3 GET as last fallback.
+  Q8   When every field of an event loses the sequence check, look in that record's history
+       for the same event_id OR the same sf_seq; found = duplicate, write nothing. A
+       genuinely older event has a sequence not in history and is recorded as superseded.
+```
+
 ## Decisions
 
 ### D1 - Peak and quiet edit rates - DECIDED
@@ -599,6 +653,9 @@ Frontier empty. Section written to docs/outbound.md.
   Reason: otherwise an older queued portal value (10:00) overwrites a newer sales edit (11:00) still in the
   log; the portal ends on 11:00 and Salesforce on 10:00, and nothing repairs it (D17 never sends back).
   With replay first, the D16 guard drops the older value. Recomputed: 60T = 438,324 -> T = 7,305 s ~ 122 min.
+  **UPDATED by Q10a (Phase 8):** 324 is the six-hour window alone. With up to 15 min before it, the replay is
+  675,000 events = 338 calls; 60T = 438,338 -> T = 7,305.6 s ~ 122 min (rate limit); end to end with the replay
+  applied first ~128 min; 50% merged 60T = 222,338 -> ~62 min.
 - Rate by phase: normal <= 80 req/s (20 req/s headroom always reserved); outage ~0 (one probe / 30 s);
   recovery 20 -> 40 -> 80 req/s; drain at 80 split 40/40 with borrowing.
 
@@ -638,6 +695,8 @@ Riskiest rules first (inside out):
 ### D24 - Three numbers to watch - DECIDED
 - User decision: the red line follows the brief's 30 s worst case, not a looser 120 s.
 - M1 Oldest unsent portal change (outbox age): page when > 30 s while Salesforce is reachable.
+  **REFINED by Q10b (Phase 8):** during catch-up M1 counts fresh-lane rows only and re-arms when their age
+  first drops below 30 s, or 15 min after recovery; plus a drain-stall page (outage.md 10.6).
   Separate outage alert: circuit breaker open > 5 min (30 s does not apply during an outage, per the brief).
 - M2 Salesforce -> portal delay (our commit time - occurredAt): page when 95 of 100 webhooks are > 30 s late,
   or a missing sequence is still unfilled after 10 min.
