@@ -136,7 +136,8 @@ The brief asks for this section at the top of the design document. Each entry ha
 ### 3.5 Rejected updates (D10)
 - **Question:** If Salesforce rejects one of our updates, should we retry, flag it, tell the user, or put the old value back?
 - **Assumption:**
-  - **A `4xx` rejection:** never retried. The portal field goes back to the last value Salesforce confirmed, but **only if it still holds the rejected value**, so another user's later edit isn't wiped. The portal shows "rejected by Salesforce: <reason>", and history keeps the attempt.
+  - **A `4xx` rejection:** the portal field goes back to the last value Salesforce confirmed (`sfValue`), but **only if it's still the same edit** (`editId`), so a later save isn't wiped, even one with the same value. If the error names the bad fields, the other fields are resent once. A rejected create is never reverted. The portal shows "rejected by Salesforce: <reason>", and history keeps the attempt (O2′, O3′).
+  - **Error replies name the failing fields** in most cases; if not, every field in the call is treated as rejected.
   - **`429`, `5xx` and timeouts:** retried.
 - **If the answer goes the other way:** if the client prefers to keep the portal value and flag it, we skip the revert and show the record as "out of sync" until someone fixes it.
 

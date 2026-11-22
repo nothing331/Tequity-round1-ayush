@@ -71,8 +71,10 @@ next, and standard plumbing comes last.
   - **Merging:** each record has at most one pending row, and a new edit updates it. A row being sent is locked, so edits arriving meanwhile go to a new row.
   - **Sending:** the worker sends to a **fake Salesforce**. Creates are upserts on `Portal_Id__c`, and every write carries `Portal_Change_Id__c`.
   - **Confirmation:** the API reply is the confirmation, and it returns the record's new version.
-  - **Conditional update (G1, V1):** every update carries `sf_seq_contiguous`, the highest sequence with no gap below it. A `412` means Salesforce has events we haven't applied. The row waits 5 s for in-flight webhooks, runs a `replay_record` job if it's still behind, then re-runs the guard on exact per-field times and resends only the winning fields. There's no GET. If our earlier attempt landed, its echo arrives with our `change_id`.
-  - **Create or update at claim time (V7):** an upsert on `Portal_Id__c` if there's no `sf_id`, otherwise a conditional update. A contact whose customer has no `sf_id` waits (V2).
+  - **Conditional update (G1, V1):** every update carries `sf_seq_contiguous`, the highest sequence with no gap below it. A `412` means Salesforce has events we haven't applied. The row waits 5 s for in-flight webhooks, runs a `replay_record` job if it's still behind, then re-runs the guard on exact per-field times and resends only the winning fields. There's no GET. The row stays `sending` until evidence decides: an event carrying its key `ob_<id>.<gen>` means it landed; a full replay without it means it didn't (O1′).
+  - **Create or update at claim time (V7):** an upsert on `Portal_Id__c` carrying the full current record if there's no `sf_id`, otherwise a conditional update. A contact whose customer has no `sf_id` is parked until `link_contacts` wakes it (V2, O3′).
+  - **One row in flight per record (O1′):** `UNIQUE (record_id) WHERE status = 'sending'`, `lease_until` for "mid-call", and the claim skips a record with a `sending` row.
+  - **Edit identity (O1′, O2′):** each outbox field carries the `editId` of its save; the guard and the revert check compare it with `field_meta.editId`.
   - **Three-step send (G2b):** claim (transaction), HTTP call (no transaction), store result (transaction). The Salesforce client throws if it is called inside `withRecordLock`.
 - **Why third:** the next biggest risk is duplicates in Salesforce and loops. Every outbound feature depends on it.
 - **Rules:**
@@ -87,7 +89,10 @@ next, and standard plumbing comes last.
   - **a sales edit that lands in Salesforce after our guard check but before our send gets a `412`, and both sides end on the later value** (G1)
   - calling the Salesforce client inside `withRecordLock` throws (G2b)
   - **with seq 2 missing and seq 3 received, our send carries version 1 and gets a `412`, not a stale write** (V1)
-  - a contact created with its new customer is sent only after the customer's create is confirmed (V2)
+  - a contact created with its new customer is sent only after the customer's create is confirmed, including when the webhook adopts the customer before the reply (V2, O3′)
+  - r1 times out, r2 waits, r1's retry gets `412`: r1 ends `sent` on the echo or replay carrying `ob_1042.1`, and only then is r2 sent (O1′)
+  - phone rejected while the same value was saved again: the phone isn't reverted, the city is resent once (O2′)
+  - after a worker restart, a `sending` row with an expired lease is resent with the same key and content (O1′)
 
 ## 4. Rate limiter, 429 handling, circuit breaker, surviving a restart
 
@@ -141,7 +146,7 @@ next, and standard plumbing comes last.
 | Feature | Rule | Decision |
 |---|---|---|
 | Contact before its customer | Store with `customer_sf_id`, shown as "customer pending". Fetch the customer at 5 s, 15 s, 25 s. Stay pending if all three fail | D14 |
-| Rejected update (4xx) | Revert to the last value Salesforce confirmed **only if the field still holds the rejected value**. Show "rejected by Salesforce: <reason>" | D10 |
+| Rejected update (4xx) | Revert to `sfValue` **only if the field's `editId` still equals the rejected attempt's** (a newer save of the same value is kept). If the error names fields, resend the rest once. Never revert a rejected create. Show "rejected by Salesforce: <reason>" | D10, O2′, O3′ |
 | Two portal users, same field | Each changed field carries the `updatedAt` the form loaded. A mismatch gets `409` with the current value. Other fields are accepted | D20 |
 | Gap in the sequence | Apply the newer event and log the gap. If the missing one hasn't arrived within 10 s, replay that record from the change log | D19 |
 | Overwritten finance edit | Badge on the field, built from history: "replaced by <actor> in Salesforce at <time>", with a "Use my value again" button that sends a normal PATCH with `baseUpdatedAt` | D16, G1b |

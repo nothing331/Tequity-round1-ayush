@@ -397,6 +397,63 @@ Round 2 (user's lost-reply create scenario)
       messy merge of history and links).
 ```
 
+## Phase 7 - The outbound path (outline item 6)
+
+```
+Already settled: S4 portal API + saveEdit(); D20 per-field 409; D23/T3 outbox merge, one pending row;
+V6 change_id at creation; G2b three-step send; V7 create vs update at claim; V2 contact waits for
+customer; G1/V1 precondition on sf_seq_contiguous, 412 waits then replays; G1b back-off after 5 412s;
+D16 guard; D11 80 req/s, 429 pause, breaker, ramp; D21 lanes; D10 4xx revert via sfValue;
+I1 reply moves forward only; I2 set sf_id only if NULL.
+
+Round 1
+  O1  Per-record ordering and the row's state after a timeout or a 412 ................... DECIDED (as O1')
+      Found: nothing stops the worker (about 50 calls in flight) claiming a record's newer
+      pending row while its older row is still in flight or retrying, so an older value can
+      land last. And "a 412 puts the row back to pending" breaks the one-pending-row index
+      when a newer pending row already exists.
+  O2  A whole update rejected for one bad field (Salesforce is all-or-nothing) ............ DECIDED (as O2')
+  O3  A rejected CREATE: what happens to the portal record and its waiting contacts ...... DECIDED (as O3')
+
+Round 2 (user's probes of O1-O3) - revised proposals, ALL DECIDED (a)
+  Found while tracing:
+  - A 412 after a timeout cannot tell "our write landed" from "someone else changed it";
+    nothing said what evidence decides, and a new change_id breaks the history link (V6
+    put change_id on history rows).
+  - "Retry rows stuck in sending > 60 s" mixes "in flight now" with "waiting to retry".
+  - D10 reverts when the field "still holds the rejected value": a newer save of the SAME
+    value is reverted wrongly.
+  - A create rejected for one field would be "reverted" to sfValue = NULL, wiping fields.
+  - A retried create carrying only the newly saved field would create a partial record.
+  - V2 unblocks contacts only on the create REPLY; if the webhook adopts the customer first
+    (I2) and the reply is lost, contacts wait for a reply that never comes.
+  O1' Edit identity + send key + one row in flight:
+      field_meta.editId = id of the history row that set the current value; outbox fields
+      = {field: {value, editId}}; send key = "<outbox id>.<content gen>", gen +1 only when
+      content changes; history.change_id dropped (link is editId). UNIQUE (record_id) WHERE
+      status = 'sending'; lease_until marks "in flight"; retries/restart claim sending rows
+      that are due with an expired lease. An uncertain attempt resolves only on evidence:
+      an event carrying our key (echo or replay) = landed; a replay of every event after
+      base_version without our key = not landed (the precondition means it can never land
+      later). G3 fallback: GET Portal_Change_Id__c.
+  O2' Revert a field only if field_meta.editId still equals the rejected attempt's editId;
+      "city still wins" = its editId unchanged; one resend (gen +1); a second rejection
+      reverts what remains (same check), row rejected, no third attempt.
+  O3' No revert on a rejected create; an upsert carries the full current record (every
+      field with its editId); whoever sets a customer's sf_id (reply, webhook adopt, fetch)
+      queues link_contacts: copy sf_id into customer_sf_id and wake parked contact rows;
+      the contact's AccountId is read from customers.sf_id at claim.
+  Rejected: per-field updatedAt as edit identity (equal timestamps, clock steps back); value
+  compare (fails on the same value saved again); fresh random key + key list (more state, list
+  lookup on echo); "sending > 60 s" retry rule (can't tell mid-call from waiting); unblock contacts
+  only on the create reply (hangs when the webhook adopts first and the reply is lost).
+  Supersedes: V6 (history.change_id, change_id column), the data.md "412 -> back to pending" line,
+  G2b's "sending > 60 s" rule, D10's value-based revert guard, V2's "on the create reply" trigger.
+
+Frontier empty. Section written to docs/outbound.md.
+
+```
+
 ## Decisions
 
 ### D1 - Peak and quiet edit rates - DECIDED

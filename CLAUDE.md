@@ -44,11 +44,19 @@ unsaved one (D23). The costs we accepted, and the rules that contain them:
    gap below it), never on `sf_seq_max`: a missing webhook below our version must cause a `412`, not a
    stale write. On `412`: no GET. Wait 5 s for in-flight webhooks; if `sf_seq_contiguous` has not
    passed `base_version`, run a `replay_record` job; then re-run the guard on exact per-field times and
-   resend only the winners. Our own landed write is recognised by its echo's `change_id`. Never retry a
+   resend only the winners. Our own landed write is recognised by an event carrying its key `ob_<id>.<content_gen>`. Never retry a
    lost field automatically; the user overrides with "Use my value again".
 8. **Replay restarts from a heartbeat minus an overlap**, never from "the last `eventId` we applied"
    (webhooks arrive out of order).
-9. **A contact is never sent before its customer has an `sf_id`**; the claim pushes it back 2 s.
+9. **A contact is never sent before its customer has an `sf_id`**; the claim parks it, and
+   `link_contacts` (queued by whatever sets the customer's `sf_id`) wakes it.
+10. **At most one `sending` outbox row per record** (unique partial index). A `sending` row's content
+    and key are frozen; after a timeout, `5xx` or `412` it stays `sending` and never returns to
+    `pending`. Only evidence (an event with its key, or a full replay without it) decides whether an
+    uncertain attempt landed (`docs/outbound.md` 6.6).
+11. **Revert and guard by `editId`, never by value.** A field is reverted or sent only if
+    `field_meta.editId` still equals the outbox field's `editId`. One resend after a rejection, never a
+    third attempt; never revert a rejected create.
 
 ## Other fixed rules
 

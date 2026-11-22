@@ -111,8 +111,9 @@ BEGIN -> SELECT ... FOR UPDATE on the record row -> read per-field state
   The Salesforce client throws if it is called while `withRecordLock` is active (unit-tested).
 - **Postgres safety net, per role:** `idle_in_transaction_session_timeout = 5s`, `lock_timeout = 2s`,
   `statement_timeout = 5s`.
-- **A crash between steps leaves nothing locked.** Rows stuck in `sending` for more than 60 s are resent with
-  the same `Portal_Change_Id__c`.
+- **A crash between steps leaves nothing locked.** A `sending` row is retried, with the same key and content,
+  once its retry is due and its `lease_until` has passed, including after a restart. At most one `sending`
+  row per record (outbound.md 6.3, O1′).
 
 ## 2.4 The network boundary (S6)
 
@@ -195,10 +196,11 @@ per request. Batching is not assumed.
 | Reply | Worker does |
 |---|---|
 | `2xx` | Marks the outbox row sent and stores the returned ID and new version. On a create, it sets `sf_id` only if it's still NULL. If the create webhook already adopted the row with the same ID (inbound.md 5.3), nothing changes; a different ID is logged and counted in M3 (I2). The sent fields' `sfSeq` and `sfValue` move forward only if the new version is newer, so a late reply can't undo a newer webhook (I1) |
-| `412` (Salesforce has events we haven't applied) | No GET (V1). Puts the row back to `pending` for 5 s, so the webhooks in flight can land. If none has moved `sf_seq_contiguous` past the row's `base_version` by then, runs a `replay_record` job first. Then re-runs the guard on exact per-field times and resends only the fields that still win. If our own earlier attempt had landed (a lost reply), its echo arrives carrying our `change_id` and the row is marked sent. Fields that lost show the badge (G1b). After 5 `412`s in a row: slower retry, counted in M3 |
+| `412` (Salesforce has events we haven't applied) | No GET (V1). The row **stays `sending`**. It waits 5 s for in-flight webhooks, then runs a `replay_record` job if no evidence has arrived. An event carrying the row's key (`ob_<id>.<gen>`) = landed → `sent`. A replay of every event after `base_version` without it = not landed → re-run the guard and resend (new `content_gen` if the content changed) (outbound.md 6.6, O1′). Fields that lost show the badge (G1b). After 5 `412`s in a row: slower retry, counted in M3 |
 | `429` + `Retry-After` | Pauses **all** sending for that long and keeps the work (D11) |
 | `5xx` or timeout | Retries with exponential backoff and jitter. 5 failures in a row open the breaker, with a test call every 30 s |
-| `4xx` (validation) | Doesn't retry. Reverts the field only if it still holds the rejected value, and shows "rejected by Salesforce: reason" (D10) |
+| `4xx` (validation) | Reverts a field only if its `editId` still equals the rejected attempt's, and shows "rejected by Salesforce: reason". If the error names fields, the rest are resent **once**; a second rejection ends the row. A rejected create is never reverted (outbound.md 6.7, O2′, O3′) |
+| Timeout or `5xx` on any call | The row stays `sending` with the same key and content; it may have landed (O1′) |
 | `401` | Refreshes the token once, then retries |
 
 ## 2.7 Interface on the portal side (S4)

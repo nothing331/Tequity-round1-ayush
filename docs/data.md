@@ -72,9 +72,9 @@ If Salesforce sends no `sequence` (G3), both columns stay NULL and the precondit
 ```json
 {
   "city":  { "updatedAt": "2026-11-02T11:20:00.120Z", "source": "portal",
-             "actor": "finance.user@client.example", "sfSeq": 1, "sfValue": "Mumbai" },
+             "actor": "finance.user@client.example", "editId": 17, "sfSeq": 1, "sfValue": "Mumbai" },
   "phone": { "updatedAt": "2026-11-02T11:30:04.000Z", "source": "salesforce",
-             "actor": "sales.user@client.example", "sfSeq": 3, "sfValue": "+919876543210" }
+             "actor": "sales.user@client.example", "editId": 31, "sfSeq": 3, "sfValue": "+919876543210" }
 }
 ```
 
@@ -83,6 +83,7 @@ If Salesforce sends no `sequence` (G3), both columns stay NULL and the precondit
 | `updatedAt` | The time used to decide conflicts: Salesforce `occurredAt`, or the portal's time inside the save transaction, taken after the record lock | D16 |
 | `source` | `portal` or `salesforce` | D16 tie-break, badge |
 | `actor` | The person's email, as the brief's samples give it: `changedBy` on a webhook, the logged-in user's email on a portal save (the brief's `editedBy`). For a fetch or sweep, the record's last modifier's email (assumption 3.8) (V4) | history, badge |
+| `editId` | The `id` of the history row that set the **current value**. Changes on every portal save, every Salesforce value that wins, and every revert. Unchanged by an echo or a Salesforce value that loses on time | Outbound guard and revert check: "is this still the edit we sent?" (O1′, O2′) |
 | `sfSeq` | The Salesforce `sequence` that last set this field | D19 out-of-order rule |
 | `sfValue` | The last value Salesforce is known to hold. Moves forward with `sfSeq` on any webhook, echo or confirmed send, even when the field keeps a newer portal value (inbound.md 5.2) | D10 revert after a rejection |
 
@@ -102,7 +103,7 @@ Append-only. Rows are inserted and never updated.
 
 ```
 history                                   -- PARTITION BY RANGE (recorded_at), one partition per month
-  id            bigint identity
+  id            bigint identity           -- also the edit's editId (O1′); one sequence across partitions
   record_type   text                      -- customer | contact
   record_id     uuid
   field         text
@@ -114,7 +115,6 @@ history                                   -- PARTITION BY RANGE (recorded_at), o
   occurred_at   timestamptz               -- the time the conflict rule compared
   recorded_at   timestamptz               -- when we wrote the row
   event_id      text NULL                 -- webhook / replay event
-  change_id     text NULL                 -- Portal_Change_Id__c of the outbox row this save went into (V6)
   sf_seq        bigint NULL
   superseded    boolean                   -- this value lost at the moment it arrived (older sequence or earlier time)
   note          text NULL                 -- e.g. "rejected by Salesforce: <reason>", "normalised by Salesforce"
@@ -151,43 +151,47 @@ sync.inbox                               -- PARTITION BY RANGE (received_day), o
 - We store only the keys, not the body, so a webhook for a record is never applied twice and the table
   stays small.
 
-## 4.5 `sync.outbox` (D23, T3, G1, G2b)
+## 4.5 `sync.outbox` (D23, T3, G1, G2b, O1′)
 
 ```
 sync.outbox
   id               bigint identity PK
   record_type      text
   record_id        uuid                 -- our record (Portal_Id__c)
-  fields           jsonb                -- merged pending values: {"city": "Noida", "phone": "..."}
-  change_id        text                 -- Portal_Change_Id__c; set when the pending row is created,
-                                        --   kept through merges, reused on every retry (V6)
-  base_version     bigint NULL          -- sf_seq_contiguous at claim time, sent as the precondition (G1, V1)
+  fields           jsonb                -- {"city": {"value": "Noida", "editId": 17}, ...}: each value with the
+                                        --   history row of the save it came from (O1′)
+  content_gen      int                  -- content version; send key = "ob_<id>.<content_gen>" (O1′)
+  base_version     bigint NULL          -- sf_seq_contiguous when the content was built: the precondition (G1, V1)
   status           text                 -- pending | sending | sent | rejected
+  lease_until      timestamptz NULL     -- in the future = a call is in flight right now (O1′)
   attempts         int
   consecutive_412  int                  -- back off after 5 (G1b)
-  next_attempt_at  timestamptz
+  next_attempt_at  timestamptz          -- when a pending row may be claimed, or a sending row retried
   created_at       timestamptz          -- picks the lane after an outage (D21)
-  claimed_at       timestamptz NULL     -- rows 'sending' for > 60 s are resent (G2b)
   last_error       text NULL
 ```
 
 - **One pending row per record:** `UNIQUE (record_id) WHERE status = 'pending'`. A save does
-  `INSERT … ON CONFLICT (record_id) WHERE status = 'pending' DO UPDATE SET fields = outbox.fields || EXCLUDED.fields`.
-  A `sending` row doesn't count, so an edit made during a send starts a new pending row, with a new
-  `change_id`. Every history row a save writes carries the `change_id` of the row it went into.
-- **Echo lookup:** `UNIQUE (change_id)`. An echo webhook finds its row in one index read.
-- **Create or update is decided at claim time, not at save time** (V7). If the record has an `sf_id`, the
-  worker sends a conditional update with `base_version`. If not, it sends an upsert on `Portal_Id__c`. This
-  also covers a record edited again while its create is still in flight.
-- **A contact waits for its customer** (V2). At claim time, if the contact's customer has no `sf_id`, the row
-  is pushed back 2 s. When the customer's create reply arrives, the worker copies its `sf_id` into
-  `customer_sf_id` on its contacts, in batches of 500, each batch its own transaction (G2b). If Salesforce rejects the customer, its contacts stay
-  pending, shown as "waiting for customer: rejected by Salesforce".
-- **On a `412`** (V1): the row goes back to `pending` with `next_attempt_at` = now + 5 s and
-  `consecutive_412` + 1. If, by the next claim, no webhook has moved `sf_seq_contiguous` past the row's
-  `base_version`, a `replay_record` job runs first. The guard then runs on exact per-field times. There is
-  no GET.
-- **Claiming:** index on `(next_attempt_at) WHERE status = 'pending'`.
+  `INSERT … ON CONFLICT (record_id) WHERE status = 'pending' DO UPDATE SET fields = outbox.fields || EXCLUDED.fields`,
+  so a newer edit to a field replaces that field's `{value, editId}`.
+- **One row in flight per record:** `UNIQUE (record_id) WHERE status = 'sending'`. The claim skips a pending row
+  while its record has a `sending` row, so a record's changes reach Salesforce in save order (O1′).
+- **The send key** is `Portal_Change_Id__c = "ob_<id>.<content_gen>"`. A retry reuses it. `content_gen` goes up only
+  when the content changes (outbound.md 6.6, 6.7). An echo finds its row by the `id` inside the key, so no
+  separate key column or index is needed.
+- **History is linked by `editId`,** not by key: `fields[f].editId` points at the history row of each save the
+  row carries, in every content version.
+- **Create or update is decided at claim time** (V7). With an `sf_id`: a conditional update with `base_version`,
+  carrying only the row's fields. Without one: an upsert on `Portal_Id__c` carrying **the full current record**,
+  each field's `editId` written into the row (O3′).
+- **A contact waits for its customer** (V2, O3′). If the payload needs an `AccountId` and the customer has no
+  `sf_id`, the row is parked: `next_attempt_at = now() + 5 min`. Whatever sets the customer's `sf_id` (reply,
+  webhook adopt, fetch) queues `link_contacts`, which wakes it.
+- **Timeout, `5xx` or `412`:** the row **stays `sending`** with the same content and key; `lease_until` is cleared
+  and `next_attempt_at` set. It never goes back to `pending`. Whether an uncertain attempt landed is decided only by
+  evidence (outbound.md 6.6).
+- **Claiming and restart:** index on `(next_attempt_at) WHERE status IN ('pending', 'sending')`. A `sending` row is
+  retried when it's due and `lease_until` has passed, including after a worker restart (outbound.md 6.3).
 - **Sent rows** are kept 7 days, for echo matching and support, then deleted in small batches every minute.
   That keeps the delete load steady. This table can't be partitioned the way the inbox is, because the
   one-pending-row index must cover the whole table.
@@ -200,7 +204,7 @@ sync.outbox
 ```
 sync.jobs
   id           bigint identity PK
-  type         text          -- fetch_customer | fetch_record | replay_record | fetch_user
+  type         text          -- fetch_customer | fetch_record | replay_record | fetch_user | link_contacts
   record_type  text
   sf_id        text    
   run_at       timestamptz   -- 5 s / 15 s / 25 s schedule for fetches; +10 s for a gap replay or after a 412
@@ -216,6 +220,7 @@ sync.jobs
 | `fetch_record` | A webhook for an unknown record with **sequence > 1**, so we only have some of its fields (S3). An unknown record with **sequence 1** is a create carrying every field: we insert it, and no fetch is needed (V8) |
 | `replay_record` | A sequence gap is still unfilled after 10 s (D19), or an outbox row got a `412` and `sf_seq_contiguous` hasn't caught up (V1) |
 | `fetch_user` | A webhook carries an owner ID not in `sync.sf_users` (V3) |
+| `link_contacts` | A customer's `sf_id` is set, by any path. Copies it into its contacts' `customer_sf_id` and wakes their parked outbox rows, in batches of 500 (O3′). Makes no Salesforce call |
 
 Finished jobs are deleted after 1 day. They use the 20 req/s headroom, never the 80 req/s outbox share.
 
