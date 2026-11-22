@@ -1,0 +1,10 @@
+1. Which of these fields are we actually allowed to change in Salesforce? Are there validation rules, read-only fields, or fields owned by one team that we should know about? And if Salesforce rejects one of our updates, what would you like to happen: should we retry it, flag it, tell the portal user, or put the old value back?
+2. When a portal user creates a new record, how can we be sure it doesn't get created twice if the network drops halfway? Does Salesforce let us attach our own ID to a record (an external ID) and "create or update" by it, or is there another way you'd suggest?
+3. When we create a record in Salesforce, what does it send back to us: the new record ID, a success or failure, a timestamp? And when the webhook for that same change arrives, how will we be able to tell it was our own change and not something a sales person did?
+4. How can we be sure a webhook really came from Salesforce? Is there a shared secret or signature we can check, since the endpoint is open to the public internet?
+5. How reliable is the ordering and timing of webhooks? Is there a version or sequence number per record, how precise is the occurredAt time, and how far apart can Salesforce's clock and ours be?
+6. If our endpoint is down or Salesforce is unreachable, does Salesforce retry its webhooks, and for how long? After the 6-hour outage, can we ask Salesforce which records changed during that time, or are those changes simply lost?
+7. How do the first 5 million records get into the portal at the start? Is there a separate bulk load, or would that all go through the normal record API?
+8. Can a contact ever reach us before the customer it belongs to? If it can, how would you want us to handle it?
+9. How long do we need to keep the history of changes, and who will look at it? Is it checked record by record, or searched across everything?
+10. What traffic can we expect at peak and low time for these request and how many simultaneous request can we expect?

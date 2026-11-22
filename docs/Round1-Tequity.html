@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two-way sync of customer and contact records</title>
+<meta name="description" content="Tequity builds software for clients. This is the Round 1 exercise.">
+<meta name="robots" content="noindex, nofollow">
+<meta property="og:title" content="Two-way sync of customer and contact records">
+<meta property="og:description" content="Tequity builds software for clients. This is the Round 1 exercise.">
+<meta property="og:type" content="article">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23000'/%3E%3Cpath d='M7 12h14M17 8l4 4-4 4M25 20H11M15 16l-4 4 4 4' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='square'/%3E%3C/svg%3E" type="image/svg+xml">
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+<style>
+
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@5.2.5/latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@5.2.5/latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@5.2.5/latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-mono@5.2.5/latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-mono@5.2.5/latin-500-normal.woff2") format("woff2");
+}
+
+:root {
+  --s-0: 0px;
+  --s-25: 2px;
+  --s-50: 4px;
+  --s-75: 8px;
+  --s-100: 12px;
+  --s-200: 16px;
+  --s-300: 24px;
+  --s-400: 32px;
+  --s-500: 40px;
+  --s-600: 48px;
+  --s-700: 64px;
+  --s-800: 80px;
+  --s-900: 96px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ink: #000000;
+  --paper: #ffffff;
+  --muted: #666666;
+  --code: #181818;
+  --line: #313131;
+  --sans: "Geist Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: auto; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  font-style: normal;
+  text-wrap: pretty;
+  color-scheme: light;
+}
+
+img, svg, video { max-width: 100%; }
+
+button, input { font: inherit; color: inherit; }
+
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.heading-1 { font-size: 60px; line-height: 60px; font-weight: 600; text-wrap: balance; }
+.heading-2 { font-size: 48px; line-height: 48px; font-weight: 600; text-wrap: balance; }
+.heading-3 { font-size: 36px; line-height: 40px; font-weight: 600; text-wrap: balance; }
+.heading-4 { font-size: 30px; line-height: 36px; font-weight: 600; text-wrap: balance; }
+.heading-5 { font-size: 24px; line-height: 32px; font-weight: 600; text-wrap: balance; }
+.heading-6 { font-size: 20px; line-height: 28px; font-weight: 600; text-wrap: balance; }
+.title-1 { font-size: 20px; line-height: 28px; font-weight: 500; }
+.title-2 { font-size: 18px; line-height: 28px; font-weight: 500; }
+.title-3 { font-size: 16px; line-height: 24px; font-weight: 500; }
+.title-4 { font-size: 14px; line-height: 20px; font-weight: 500; }
+.title-5 { font-size: 12px; line-height: 16px; font-weight: 500; }
+.body-1 { font-size: 16px; line-height: 24px; font-weight: 600; }
+.body-2 { font-size: 16px; line-height: 24px; font-weight: 500; }
+.body-3 { font-size: 16px; line-height: 24px; font-weight: 400; }
+.body-4 { font-size: 14px; line-height: 20px; font-weight: 600; }
+.body-5 { font-size: 14px; line-height: 20px; font-weight: 500; }
+.body-6 { font-size: 14px; line-height: 20px; font-weight: 400; }
+.button-md { font-size: 16px; line-height: 24px; font-weight: 600; }
+.button-sm { font-size: 14px; line-height: 20px; font-weight: 600; }
+.caption-3 { font-size: 12px; line-height: 16px; font-weight: 600; }
+.caption-4 { font-size: 12px; line-height: 16px; font-weight: 500; }
+.caption-5 { font-size: 12px; line-height: 16px; font-weight: 400; }
+
+h1, h2, h3, p { margin: 0; }
+h1, h2, h3, p, li, td, th { overflow-wrap: break-word; hyphens: manual; }
+strong { font-weight: 600; }
+em, i, cite { font-style: normal; }
+
+a {
+  color: inherit;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  transition: color 300ms var(--ease), background-color 300ms var(--ease), opacity 300ms var(--ease), transform 500ms var(--ease);
+}
+p a:hover, li a:hover, .footer a:hover { color: var(--muted); }
+p a:active, li a:active { transform: translateY(1px); }
+
+code {
+  font-family: var(--mono);
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+p code, li code, td code {
+  overflow-wrap: anywhere;
+}
+
+.skip {
+  position: absolute;
+  left: var(--s-200);
+  top: var(--s-200);
+  z-index: 80;
+  padding: var(--s-75) var(--s-100);
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: 8px;
+  text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform 500ms var(--ease);
+}
+.skip:focus { transform: translateY(0); }
+
+.nav-check {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.nav-bar {
+  position: fixed;
+  top: var(--s-200);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: var(--s-50);
+  width: max-content;
+  max-width: calc(100% - var(--s-600));
+  padding: var(--s-75);
+  background: rgba(255, 255, 255, 0.86);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--ink);
+  border-radius: 9999px;
+}
+
+.mark {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  text-decoration: none;
+  flex: 0 0 auto;
+}
+.mark:hover { background: var(--ink); color: var(--paper); }
+.mark:active { transform: scale(0.98); }
+.mark .ph { font-size: 20px; line-height: 28px; }
+
+.nav-links { display: none; align-items: center; gap: var(--s-50); flex-wrap: wrap; justify-content: center; }
+.nav-links a {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--s-75) var(--s-100);
+  border-radius: 9999px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.nav-links a:hover { background: #181818; color: var(--paper); }
+.nav-links a:active { transform: scale(0.98); }
+.nav-links a[aria-current="true"] { background: var(--ink); color: var(--paper); }
+
+.menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 32px;
+  padding: var(--s-75) var(--s-100);
+  border-radius: 9999px;
+  cursor: pointer;
+}
+.menu-toggle:hover { background: #181818; }
+.menu-toggle:hover .bars i { background: var(--paper); }
+.menu-toggle:active { transform: scale(0.98); }
+.nav-check:focus-visible + .nav-bar .menu-toggle {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.bars {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.bars i {
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 16px;
+  height: 2px;
+  background: var(--ink);
+  border-radius: 9999px;
+  transition: transform 500ms var(--ease), background-color 300ms var(--ease);
+}
+.bars i:nth-child(1) { transform: translateY(-4px); }
+.bars i:nth-child(2) { transform: translateY(4px); }
+.nav-check:checked + .nav-bar .bars i:nth-child(1) { transform: translateY(0) rotate(45deg); }
+.nav-check:checked + .nav-bar .bars i:nth-child(2) { transform: translateY(0) rotate(-45deg); }
+
+.menu {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(255, 255, 255, 0.94);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--s-200);
+  padding: var(--s-900) var(--s-300) var(--s-600);
+  overflow: auto;
+}
+.nav-check:checked ~ .menu { display: flex; }
+body:has(.nav-check:checked) { overflow: hidden; }
+.menu a {
+  text-decoration: none;
+  color: var(--ink);
+}
+.menu a[aria-current="true"] { color: var(--muted); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .nav-check:checked ~ .menu a {
+    animation: menu-in 500ms var(--ease) both;
+  }
+}
+.menu a:nth-child(1) { animation-delay: 0ms; }
+.menu a:nth-child(2) { animation-delay: 60ms; }
+.menu a:nth-child(3) { animation-delay: 120ms; }
+.menu a:nth-child(4) { animation-delay: 180ms; }
+.menu a:nth-child(5) { animation-delay: 240ms; }
+.menu a:nth-child(6) { animation-delay: 300ms; }
+.menu a:nth-child(7) { animation-delay: 360ms; }
+.menu a:nth-child(8) { animation-delay: 400ms; }
+.menu a:nth-child(n + 9) { animation-delay: 400ms; }
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (min-width: 1180px) {
+  .nav-links { display: flex; }
+  .menu-toggle { display: none; }
+  .menu { display: none !important; }
+}
+
+.wrap {
+  width: 100%;
+  max-width: 1216px;
+  margin-inline: auto;
+  padding-inline: var(--s-200);
+}
+.measure { max-width: 680px; }
+.wide { width: 100%; max-width: 1120px; }
+
+.hero { padding-top: var(--s-900); padding-bottom: var(--s-800); }
+.hero-copy { display: flex; flex-direction: column; gap: var(--s-200); max-width: 680px; }
+.hero-copy h1 { margin-bottom: var(--s-75); }
+.heading-gradient { color: var(--ink); max-width: 680px; }
+.line { display: block; text-wrap: balance; }
+.keep { white-space: nowrap; }
+.br { display: none; }
+@media (max-width: 799px) {
+  .line { display: inline; }
+  .br.mob { display: block; height: 0; }
+}
+@media (min-width: 800px) {
+  .br.desk { display: block; height: 0; }
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .heading-gradient {
+    background-image: linear-gradient(90deg, #000000, #666666);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-100);
+  max-width: 680px;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: 16px;
+  padding: var(--s-200) var(--s-300);
+}
+.callout .ph { font-size: 24px; line-height: 32px; flex: 0 0 auto; }
+
+.section { padding-bottom: var(--s-800); scroll-margin-top: var(--s-900); }
+.section-head { max-width: 680px; margin-bottom: var(--s-400); }
+.kicker {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: var(--s-100);
+}
+.kicker .ph { font-size: 24px; line-height: 32px; }
+
+.section-body { display: flex; flex-direction: column; gap: var(--s-200); min-width: 0; }
+.section-body > * { min-width: 0; }
+.measure, .tagline, .frame, .section-head, .hero-copy, .heading-gradient { max-width: min(680px, 100%); }
+.wide { width: 100%; max-width: 100%; }
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-100);
+}
+.list > li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--s-75); align-items: start; }
+.list > li > div { min-width: 0; }
+.list-ul > li { grid-template-columns: 16px minmax(0, 1fr); }
+.list-ol { counter-reset: item; }
+.list-ol > li { counter-increment: item; grid-template-columns: 32px minmax(0, 1fr); }
+.list-ol > li::before {
+  content: counter(item) ".";
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+.list-ul > li::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  margin-top: var(--s-75);
+  background: var(--ink);
+  border-radius: 9999px;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-200);
+  counter-reset: card;
+}
+.cards > li, .cards > .pair {
+  border: 1px solid var(--ink);
+  border-radius: 16px;
+  padding: var(--s-300);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-100);
+  min-width: 0;
+  background: var(--paper);
+}
+.cards.cols-3 > li { counter-increment: card; }
+.cards.cols-3 > li::before {
+  content: counter(card);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+}
+.signal-pair { counter-reset: none; }
+
+.panel {
+  border: 1px solid var(--ink);
+  border-radius: 24px;
+  padding: var(--s-75);
+  background: var(--paper);
+}
+.panel-body {
+  border-radius: 16px;
+  padding: var(--s-300);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-200);
+  min-width: 0;
+}
+.panel .list { max-width: none; }
+.panel .body-3, .panel .title-3, .panel h3 { max-width: none; }
+
+.frame {
+  background: var(--code);
+  color: var(--paper);
+  border-radius: 16px;
+  padding: var(--s-300);
+  min-width: 0;
+  max-width: min(680px, 100%);
+}
+.frame pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+}
+.frame code { font-size: 14px; line-height: 20px; color: inherit; }
+.frame-json { overflow: hidden; }
+.frame-json pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.frame-diagram { overflow-x: auto; scrollbar-width: thin; scrollbar-color: #666666 #181818; }
+@media (max-width: 799px) {
+  .frame-diagram { overflow-x: auto; padding: var(--s-200); }
+  html.js .frame-diagram { overflow: hidden; }
+}
+.frame-diagram pre { white-space: pre; width: max-content; min-width: 100%; }
+
+.table-card {
+  border: 1px solid var(--ink);
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--paper);
+}
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td {
+  padding: var(--s-200);
+  vertical-align: top;
+  text-align: left;
+  overflow-wrap: break-word;
+}
+th {
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+}
+td {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+  border-top: 1px solid var(--ink);
+}
+th + th, td + td { border-left: 1px solid var(--line); }
+td + td { border-left-color: var(--ink); }
+.table-card.cols-2 th:first-child, .table-card.cols-2 td:first-child { width: 22%; white-space: nowrap; }
+.table-card.cols-3 th:first-child, .table-card.cols-3 td:first-child { width: 28%; }
+.table-card.cols-4 th:first-child, .table-card.cols-4 td:first-child { width: 16%; }
+
+.tagline {
+  max-width: 680px;
+  padding-top: var(--s-700);
+  padding-bottom: var(--s-700);
+  margin: 0;
+}
+.word { opacity: 1; }
+
+html.js .reveal {
+  opacity: 0;
+  transform: translateY(32px);
+  transition: opacity 700ms var(--ease), transform 700ms var(--ease);
+}
+html.js .reveal.is-in { opacity: 1; transform: none; }
+html.js .word {
+  opacity: 0.3;
+  transition: opacity 500ms var(--ease);
+}
+html.js .word.is-on { opacity: 1; }
+
+.footer { padding-bottom: var(--s-800); }
+.footer a { text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+
+@media (min-width: 800px) {
+  .wrap { padding-inline: var(--s-600); }
+  .cards.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1100px) {
+  .cards.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 799px) {
+  thead { display: none; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  table { table-layout: auto; }
+  tr { padding: var(--s-200); }
+  td {
+    border: 0;
+    padding: 0 0 var(--s-100);
+    width: auto !important;
+    white-space: normal !important;
+  }
+  tr td:last-child { padding-bottom: 0; }
+  td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: var(--s-50);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+  }
+  td + td { border-left: 0; }
+  tr + tr { border-top: 1px solid var(--ink); }
+  .table-card.cols-2 th:first-child, .table-card.cols-2 td:first-child { white-space: normal; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.js .reveal { transform: none; transition: opacity 300ms var(--ease); }
+  html.js .word { opacity: 1; transition: none; }
+  .skip { transition: none; }
+  .menu a { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .bars i { transition: none; }
+}
+
+@media print {
+  .nav-bar, .menu, .nav-check, .skip, .menu-toggle { display: none !important; }
+  body { background: #fff; color: #000; }
+  .hero { padding-top: 0; }
+  .wrap { max-width: none; padding-inline: 0; }
+  .heading-gradient {
+    background: none !important;
+    -webkit-text-fill-color: #000 !important;
+    color: #000 !important;
+  }
+  .reveal, .word { opacity: 1 !important; transform: none !important; }
+  .callout, .frame, th {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .frame { border: 1px solid #000; }
+  .frame-diagram { overflow: visible; height: auto !important; }
+  .frame-diagram pre { white-space: pre-wrap; width: auto; transform: none !important; }
+  a { color: #000; text-decoration: underline; }
+  .cards, .cards.cols-2, .cards.cols-3 { grid-template-columns: minmax(0, 1fr); }
+  .cards > li, .frame, tr { break-inside: avoid; }
+  h1, h2, h3 { break-after: avoid; }
+  .section { padding-bottom: 32px; }
+}
+
+@media (min-width: 800px){ .wrap{max-width:760px;} .measure,.hero-copy,.heading-gradient,.section-head,.tagline,.frame{max-width:100%;} }
+</style>
+</head>
+<body>
+<a class="skip button-sm" href="#content">Skip to content</a>
+<input class="nav-check" id="nav-toggle" type="checkbox" aria-label="Menu">
+<header class="nav-bar">
+<a class="mark" href="#top" aria-label="Two-way sync of customer and contact records"><i class="ph ph-arrows-left-right" aria-hidden="true"></i></a>
+<nav class="nav-links" aria-label="On this page"><a class="title-4" href="#background-and-scenario">Background</a><a class="title-4" href="#the-systems-involved">Systems</a><a class="title-4" href="#requirements-and-scale">Requirements</a><a class="title-4" href="#constraints">Constraints</a><a class="title-4" href="#what-you-deliver">Deliver</a><a class="title-4" href="#what-we-will-evaluate">Evaluate</a><a class="title-4" href="#what-to-bring-to-the-call">Deliverables</a><a class="title-4" href="#assumptions-and-questions">Assumptions</a></nav>
+<label class="menu-toggle" for="nav-toggle" aria-expanded="false"><span class="bars" aria-hidden="true"><i></i><i></i></span></label>
+</header>
+<nav class="menu" id="mobile-menu" aria-label="On this page"><a class="heading-5" href="#background-and-scenario">Background</a><a class="heading-5" href="#the-systems-involved">Systems</a><a class="heading-5" href="#requirements-and-scale">Requirements</a><a class="heading-5" href="#constraints">Constraints</a><a class="heading-5" href="#what-you-deliver">Deliver</a><a class="heading-5" href="#what-we-will-evaluate">Evaluate</a><a class="heading-5" href="#what-to-bring-to-the-call">Deliverables</a><a class="heading-5" href="#assumptions-and-questions">Assumptions</a></nav>
+<main id="content">
+<article>
+<section class="hero" id="top"><div class="wrap"><div class="hero-copy"><h1 class="heading-1 heading-gradient"><span class="keep">Two-way</span><span class="br mob"></span> sync<span class="br desk"></span> of<span class="br mob"></span> customer<span class="br mob"></span> and<span class="br desk"></span> contact<span class="br mob"></span> records</h1><p class="body-3 measure">Tequity builds software for clients. This is the Round 1 exercise.</p><p class="body-3 measure">Plan on about 4 hours. Most of that time is the design.</p><p class="body-3 measure">Send the deliverables on the calendar thread by 10:00 AM IST on Monday, 23 November.</p><p class="body-3 measure">The next round will be scheduled based on your performance.</p><p class="body-3 measure">Where this note is silent, write the assumption and the question you would have asked. We will read that list.</p></div></div></section>
+<section class="section reveal" id="background-and-scenario"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-buildings" aria-hidden="true"></i></div><h2 class="heading-2">Background and scenario</h2></header><div class="section-body"><p class="body-3 measure">A client runs its sales team in Salesforce, a customer relationship management (CRM) product. Tequity has built the client an operations portal. Finance and customer-success staff work in the portal.</p><p class="body-3 measure">The same people exist in both places, as customers and as contacts. A sales person creates a customer in Salesforce. The portal should show that customer. A finance person on the portal then corrects the billing city. Salesforce should show the new city. Later, a sales person changes the phone number in Salesforce. The portal should show the new phone, and the city the finance person set should still be there.</p><p class="body-3 measure">The client also needs the history. They need to know who changed the phone, and who changed the city. The fact of an earlier edit stays on record after a later edit.</p><p class="body-3 measure">Salesforce stores its own copy. The portal stores its copy in PostgreSQL (Postgres). The two copies have to stay in sync. We are designing and building our side. Salesforce already exists, and it stays as it is.</p></div></div></section>
+<section class="section reveal" id="the-systems-involved"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-share-network" aria-hidden="true"></i></div><h2 class="heading-2">The systems involved</h2></header><div class="section-body"><p class="body-3 measure">Three parties matter.</p><ol class="cards cols-3 wide"><li><div class="body-3"><strong>Salesforce.</strong> The client's CRM. Sales users edit records here. Salesforce has its own database.</div></li><li><div class="body-3"><strong>The portal.</strong> Our application. Finance and customer-success users edit records here. Our database is Postgres.</div></li><li><div class="body-3"><strong>The network between them.</strong> Salesforce and the portal talk over the public internet, using Hypertext Transfer Protocol Secure (HTTPS). Each side keeps its own database. HTTPS is the only path between them.</div></li></ol><p class="title-3 measure">Who calls whom:</p><ul class="list list-ul measure"><li><div>When a record changes in Salesforce, Salesforce calls us. The call is a webhook: an HTTPS request to an endpoint we host. The webhook names the record and describes the change.</div></li><li><div>When a record changes in the portal, we call Salesforce. The call uses Salesforce's official record application programming interface (API): the create and update operations Salesforce already documents. The portal reaches Salesforce through that record API.</div></li><li><div>A sales user talks only to Salesforce. A portal user talks only to the portal. Neither user talks to the other system.</div></li></ul><p class="body-3 measure">The rate limit below applies to the requests we send to Salesforce. Webhooks Salesforce sends to us sit outside that cap.</p><div class="frame frame-diagram measure"><pre><code> Sales user                         Finance / customer-success user
+     |                                          |
+     | uses                                     | uses
+     v                                          v
+ Salesforce CRM                           Tequity portal
+ (their app, their database)              (our app)
+     |                                          |
+     |                                          v
+     |                                     Postgres
+     |                                     (our database)
+     |
+     |   (A) Salesforce calls us
+     |       HTTPS webhook
+     +----------------------------------&gt;  portal webhook endpoint
+     |
+     |   (B) We call Salesforce
+     |       HTTPS record API
+     &lt;----------------------------------+  portal sync worker
+           create or update record</code></pre></div><p class="body-3 measure">The webhook endpoint and the sync worker are both ours. They can be one service or two. Say which you choose, and what crosses the boundary between them.</p><p class="body-3 measure">A webhook is a message. Our endpoint has to accept it, check it, and apply it before anything is stored. A call to the Salesforce record API is a request we initiate. Salesforce may accept it, reject it, or be unreachable.</p></div></div></section>
+<section class="section reveal" id="requirements-and-scale"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-list-checks" aria-hidden="true"></i></div><h2 class="heading-2">Requirements and scale</h2></header><div class="section-body"><p class="title-3 measure">Records:</p><ul class="list list-ul measure"><li><div>Customers and contacts. About these fields, and no others, for this exercise: customer name, status, and owner; contact full name, phone, email, city, owner, and the customer they belong to.</div></li><li><div><strong>5 million records</strong> in production, customers and contacts counted together.</div></li></ul><p class="title-3 measure">Sync:</p><ul class="list list-ul measure"><li><div>While both systems are up, a create or an update on either side is visible on the other side within <strong>30 seconds</strong>. Thirty seconds is the worst case. Everyday sync should land sooner.</div></li><li><div>Both sides may create. Both sides may update.</div></li><li><div>The current value of a field is the one we can justify. The earlier values, who made them, and when, stay on record. Dropping that history counts as losing a change.</div></li><li><div>An update we send to Salesforce must not bounce back and forth forever.</div></li></ul><p class="title-3 measure">Webhooks:</p><ul class="list list-ul measure"><li><div>Salesforce may deliver the same webhook twice.</div></li><li><div>Salesforce may deliver webhooks in a different order from the order of the edits.</div></li><li><div>Each webhook carries at least the fields in the sample below. <code>occurredAt</code> is the time Salesforce gives the event.</div></li></ul><p class="body-3 measure">The CRM API allows at most <strong>100 requests per second</strong>. That is our cap on calls to Salesforce. We choose how far under the cap to run.</p><p class="body-3 measure">We left the peak edit rate open. State the rate you assume, in edits per second, and use it in the arithmetic.</p><p class="body-3 measure">Sample webhook. This is enough to start. You may add fields. Say why.</p><div class="frame frame-json measure"><pre><code>{
+  &quot;eventId&quot;: &quot;evt_1001&quot;,
+  &quot;recordId&quot;: &quot;0031A00000Abc&quot;,
+  &quot;objectType&quot;: &quot;Contact&quot;,
+  &quot;occurredAt&quot;: &quot;2026-11-02T11:30:04.000Z&quot;,
+  &quot;changedBy&quot;: &quot;sales.user@client.example&quot;,
+  &quot;changedFields&quot;: {
+    &quot;phone&quot;: &quot;+919876543210&quot;
+  }
+}</code></pre></div><p class="body-3 measure">Sample portal edit. A finance user saved the form. The sample has no time field. Decide where the time and the actor come from, and write that down.</p><div class="frame frame-json measure"><pre><code>{
+  &quot;recordId&quot;: &quot;0031A00000Abc&quot;,
+  &quot;objectType&quot;: &quot;Contact&quot;,
+  &quot;editedBy&quot;: &quot;finance.user@client.example&quot;,
+  &quot;changedFields&quot;: {
+    &quot;city&quot;: &quot;Noida&quot;
+  }
+}</code></pre></div><p class="body-3 measure">Say whether you assume a webhook carries only the changed fields, or the full record. Pick one in the design. Say what your rule does in the other case.</p></div></div></section>
+<section class="section reveal" id="constraints"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-barricade" aria-hidden="true"></i></div><h2 class="heading-2">Constraints</h2></header><div class="section-body"><p class="body-3 measure"><strong>Rate limit.</strong> At most 100 requests per second to the Salesforce record API. The cap counts the calls we make, including retries. Webhooks arriving at our endpoint sit outside this cap. If Salesforce tells us to slow down, we slow down, and we keep the work.</p><p class="body-3 measure"><strong>Outages.</strong> Design for the Salesforce API being unreachable for <strong>6 hours</strong>. Webhooks Salesforce tried to send during that window may never arrive. Pending calls to Salesforce must still be there after our own process restarts.</p><p class="body-3 measure">Thirty seconds applies while both systems are up. Catch-up after an outage is a different target. Drain the backlog as fast as the rate limit allows. Compute how long that takes, in minutes, for the edit rate you assumed. Show the division.</p><p class="body-3 measure"><strong>Consistency.</strong> Two people may edit the same record at the same time, on the same side or on opposite sides. Edits to different fields of that record both have to survive. Edits to the same field need one current value and a kept history.</p><p class="body-3 measure">Say what you use to decide which edit is current, on a webhook and on a portal save. Name the field. If you need an API this note does not give you, mark it as an assumption.</p><p class="body-3 measure"><strong>Out of scope for this weekend:</strong> deletes, Salesforce login screens, a visual user interface, a second region, and a load test against real Salesforce. If you write a program, call a fake CRM you write yourself.</p></div></div></section>
+<section class="section reveal" id="what-you-deliver"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-files" aria-hidden="true"></i></div><h2 class="heading-2">What you deliver</h2></header><div class="section-body"><p class="body-3 measure">Three things are required. A program is optional.</p><p class="tagline heading-3" data-tagline><span class="word">We</span> <span class="word">ask</span> <span class="word">for</span> <span class="word">the</span> <span class="word">chats</span> <span class="word">and</span> <span class="word">the</span> <span class="word">commits</span> <span class="word">because</span> <span class="word">we</span> <span class="word">want</span> <span class="word">to</span> <span class="word">see</span> <span class="word">how</span> <span class="word">you</span> <span class="word">prompt</span> <span class="word">the</span> <span class="word">artificial</span> <span class="word">intelligence</span> <span class="word">(AI)</span> <span class="word">assistant,</span> <span class="word">and</span> <span class="word">how</span> <span class="word">your</span> <span class="word">thinking</span> <span class="word">develops.</span> <span class="word">The</span> <span class="word">final</span> <span class="word">document</span> <span class="word">alone</span> <span class="word">does</span> <span class="word">not</span> <span class="word">show</span> <span class="word">that.</span></p><div class="panel measure"><div class="panel-body"><h3 class="heading-4">1. The design document</h3><p class="body-3 measure">This is the main piece, a few pages, long enough for the rules and the arithmetic. Write it so a teammate who was not on the call can build from it.</p><p class="body-3 measure">These four have to be in it, with a rule for each:</p><ul class="list list-ul measure"><li><div>a duplicate webhook</div></li><li><div>a change that arrives out of order</div></li><li><div>a sync loop, where our own update comes back</div></li><li><div>the 6-hour Salesforce outage, including the minutes of arithmetic</div></li></ul><p class="title-3 measure">Use this outline:</p><ol class="list list-ol measure"><li><div>Assumptions, and the questions you would ask before you lock the design.</div></li><li><div>The systems, who calls whom, the network boundary, and the interface on each side.</div></li><li><div>The subproblems, in the order you would build them. Name the subproblems first. Add a component only when a subproblem needs it.</div></li><li><div>The data you store.</div></li><li><div>The inbound path, from webhook to our database.</div></li><li><div>The outbound path, from a portal edit to a Salesforce API call.</div></li><li><div>The rule when both sides change the same record.</div></li><li><div>The rule for a duplicate webhook, and for an older webhook that arrives after a newer one.</div></li><li><div>The rule that stops a loop.</div></li><li><div>The 6-hour outage: what is on disk, how you drain it, and the minutes of arithmetic.</div></li><li><div>Three numbers you would watch, and the value at which you would call someone.</div></li><li><div>What you are leaving out of this weekend's work.</div></li></ol></div></div><div class="panel measure"><div class="panel-body"><h3 class="heading-4">2. Your full AI chat history, unedited</h3><p class="body-3 measure">Include every chat you used for this task, every prompt, and every reply.</p><p class="body-3 measure">Do not clean the chats up, trim them, or rewrite them. Leave the wrong turns in. We will read them as they happened.</p><p class="body-3 measure">A single prompt that says "build the sync", followed by an answer you did not question, is a weak submission.</p></div></div><div class="panel measure"><div class="panel-body"><h3 class="heading-4">3. Your git repository, with every commit</h3><p class="body-3 measure">Send the repository. Keep every commit and its message. Do not squash the work into one commit.</p><p class="body-3 measure">A message that says what you decided is useful. One commit called "final" is not useful.</p></div></div><div class="panel measure"><div class="panel-body"><h3 class="heading-4">4. Code, if you have time</h3><p class="body-3 measure">Code is optional. Node.js is welcome if you want to check a rule. It is not required, and we will not treat a missing program as a gap.</p><p class="body-3 measure">If you build it, use TypeScript on Node.js, version 20 or newer. It has to run with Node.js alone. Fake Salesforce. One command should run a demo from a fresh checkout. <code>npm install</code> plus that command is the upper bound.</p><p class="body-3 measure">The useful checks are the same four rules: a duplicate, an older event after a newer one, a webhook that must not be sent back to Salesforce, and a pending call that is still there after a restart while the fake Salesforce is down. The cap in the design is 100 requests per second. In a demo you may set a lower cap so the wait is visible. The code must enforce the cap it is given.</p><p class="body-3 measure">A service we would ship is out of scope.</p></div></div></div></div></section>
+<section class="section reveal" id="what-we-will-evaluate"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-check-circle" aria-hidden="true"></i></div><h2 class="heading-2">What we will evaluate</h2></header><div class="section-body"><p class="body-3 measure">We are looking at three things.</p><ol class="cards cols-3 wide"><li><div class="body-3"><strong>How you break the problem into subproblems.</strong> The order should show which part is risky, and why you take that part before the rest.</div></li><li><div class="body-3"><strong>How you design the system and its components.</strong> The systems, the caller on each path, the network boundary, and the interface on each side should be explicit. The rules for the 6-hour outage, duplicates, out-of-order changes, and sync loops should be specific, and the numbers should close.</div></li><li><div class="body-3"><strong>How you prompt an AI assistant, and how your thinking develops.</strong> The chats and the commits should show the path from the first question to the final design. You should be able to point at a place you pushed back.</div></li></ol><p class="body-3 measure">If you bring code, we will check that it matches the design. A rule that is only in the document, and a demo that does something else, will come up on the call. Bringing no code will not come up on the call.</p></div></div></section>
+<section class="section reveal" id="what-to-bring-to-the-call"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-video-camera" aria-hidden="true"></i></div><h2 class="heading-2">What to submit</h2></header><div class="section-body"><ul class="cards cols-2 wide"><li><div class="body-3"><strong>A 10-minute walkthrough.</strong> Start with the assumptions and the questions that are still open. Then the diagram: who calls whom. Then the rules for conflict, order, loops, and the outage. Then the arithmetic. We will stop you at 10 minutes and ask questions.</div></li><li><div class="body-3"><strong>The open questions.</strong> Bring the list you would have asked before starting, including the ones you closed with an assumption. For each assumption, one sentence on what would change if the answer went the other way.</div></li><li><div class="body-3"><strong>The chats and the commits.</strong> Include them in your submission.</div></li><li><div class="body-3"><strong>A running demo, only if you built the code.</strong> We may ask you to run it during the review. A duplicate, an older event after a newer one, and a restart with the fake CRM down are the likely changes. If you did not write a program, skip this.</div></li></ul></div></div></section>
+<section class="section reveal" id="assumptions-and-questions"><div class="wrap"><header class="section-head"><div class="kicker"><i class="ph ph-question" aria-hidden="true"></i></div><h2 class="heading-2">Assumptions and questions</h2></header><div class="section-body"><p class="body-3 measure">Put this section at the top of your design document. These are silent in the brief, so they need an assumption or a question:</p><ul class="list list-ul measure"><li><div>How many edits per second happen at peak, and how many in a quiet hour?</div></li><li><div>Does a webhook carry changed fields only, or the whole record?</div></li><li><div>Can we ask Salesforce for records that changed during the 6 hours, or are those changes gone unless we already have them?</div></li><li><div>When two portal users edit the same field, what does the other user see, and what do we send Salesforce?</div></li><li><div>What do we trust for order on a portal edit, given that the sample has no time field?</div></li></ul><p class="body-3 measure">Add any other question that would change the design. A question you do not have time to answer is still worth writing down.</p></div></div></section>
+</article>
+</main>
+<footer class="footer">
+<div class="wrap"><a class="title-3" href="#top">Two-way sync of customer and contact records</a></div>
+</footer>
+
+<script>
+document.documentElement.classList.add("js");
+(function () {
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var reveals = document.querySelectorAll(".reveal");
+  if (!reduce && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("is-in");
+          io.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: "0px 0px -8% 0px" });
+    reveals.forEach(function (el) { io.observe(el); });
+  } else {
+    reveals.forEach(function (el) { el.classList.add("is-in"); });
+  }
+
+  var tagline = document.querySelector("[data-tagline]");
+  var words = tagline ? tagline.querySelectorAll(".word") : [];
+  if (!tagline || reduce || !words.length) {
+    words.forEach(function (w) { w.classList.add("is-on"); });
+  } else {
+    var ticking = false;
+    function updateWords() {
+      var line = window.innerHeight * 0.62;
+      var rect = tagline.getBoundingClientRect();
+      var total = Math.max(rect.height, 1);
+      var passed = line - rect.top;
+      var progress = Math.min(1, Math.max(0, passed / (total + window.innerHeight * 0.15)));
+      var count = Math.round(progress * words.length);
+      words.forEach(function (w, i) { w.classList.toggle("is-on", i < count); });
+      ticking = false;
+    }
+    window.addEventListener("scroll", function () {
+      if (!ticking) {
+        ticking = true;
+        requestAnimationFrame(updateWords);
+      }
+    }, { passive: true });
+    updateWords();
+  }
+
+  var sections = Array.prototype.slice.call(document.querySelectorAll("main section[id]"));
+  var links = Array.prototype.slice.call(document.querySelectorAll(".nav-links a, .menu a"));
+  if ("IntersectionObserver" in window && sections.length) {
+    var spy = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        var id = "#" + entry.target.id;
+        links.forEach(function (a) {
+          if (a.getAttribute("href") === id) a.setAttribute("aria-current", "true");
+          else a.removeAttribute("aria-current");
+        });
+      });
+    }, { rootMargin: "-30% 0px -60% 0px", threshold: 0 });
+    sections.forEach(function (s) { spy.observe(s); });
+  }
+
+  function fitDiagram() {
+    var narrow = window.matchMedia("(max-width: 799px)").matches;
+    document.querySelectorAll(".frame-diagram").forEach(function (frame) {
+      var pre = frame.querySelector("pre");
+      if (!pre) return;
+      pre.style.transform = "none";
+      frame.style.height = "";
+      if (!narrow) return;
+      var pad = 32;
+      var available = Math.max(1, frame.clientWidth - pad);
+      var needed = pre.scrollWidth;
+      var scale = Math.min(1, available / needed);
+      pre.style.transformOrigin = "top left";
+      pre.style.transform = "scale(" + scale + ")";
+      frame.style.height = Math.ceil(pre.scrollHeight * scale + pad) + "px";
+    });
+  }
+  fitDiagram();
+  var fitTick = false;
+  window.addEventListener("resize", function () {
+    if (fitTick) return;
+    fitTick = true;
+    requestAnimationFrame(function () { fitTick = false; fitDiagram(); });
+  });
+
+  var box = document.querySelector(".nav-check");
+  var toggle = document.querySelector(".menu-toggle");
+  if (box && toggle) {
+    var sync = function () { toggle.setAttribute("aria-expanded", box.checked ? "true" : "false"); };
+    box.addEventListener("change", sync);
+    sync();
+    document.querySelectorAll(".menu a").forEach(function (a) {
+      a.addEventListener("click", function () { box.checked = false; sync(); });
+    });
+  }
+})();
+</script>
+
+</body>
+</html>
