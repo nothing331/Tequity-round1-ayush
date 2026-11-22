@@ -194,7 +194,7 @@ per request. Batching is not assumed.
 
 | Reply | Worker does |
 |---|---|
-| `2xx` | Marks the outbox row sent and stores the returned ID and new version. The sent fields' `sfSeq` and `sfValue` move forward only if the new version is newer, so a late reply can't undo a newer webhook (I1) |
+| `2xx` | Marks the outbox row sent and stores the returned ID and new version. On a create, it sets `sf_id` only if it's still NULL. If the create webhook already adopted the row with the same ID (inbound.md 5.3), nothing changes; a different ID is logged and counted in M3 (I2). The sent fields' `sfSeq` and `sfValue` move forward only if the new version is newer, so a late reply can't undo a newer webhook (I1) |
 | `412` (Salesforce has events we haven't applied) | No GET (V1). Puts the row back to `pending` for 5 s, so the webhooks in flight can land. If none has moved `sf_seq_contiguous` past the row's `base_version` by then, runs a `replay_record` job first. Then re-runs the guard on exact per-field times and resends only the fields that still win. If our own earlier attempt had landed (a lost reply), its echo arrives carrying our `change_id` and the row is marked sent. Fields that lost show the badge (G1b). After 5 `412`s in a row: slower retry, counted in M3 |
 | `429` + `Retry-After` | Pauses **all** sending for that long and keeps the work (D11) |
 | `5xx` or timeout | Retries with exponential backoff and jitter. 5 failures in a row open the breaker, with a test call every 30 s |

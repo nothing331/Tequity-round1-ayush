@@ -80,7 +80,7 @@ next, and standard plumbing comes last.
   - **Loop (D17):** only a portal save writes to the outbox. **The webhook path never does.** A webhook carrying our `Portal_Change_Id__c` is an echo: it confirms the outbox row, moves `sfSeq` and `sfValue` forward only if newer, keeps the portal actor, and writes no duplicate history row. If Salesforce changed our value (e.g. reformatted the phone), the difference is applied as a Salesforce change and never sent back (I1, inbound.md 5.2).
   - **Outbox guard (D16):** before sending, drop any field that a newer Salesforce value has already won.
 - **Done when:**
-  - a create whose reply is lost, then retried, leaves **one** record in the fake Salesforce
+  - a create whose reply is lost, then retried, leaves **one** record in the fake Salesforce **and one row in Postgres**, whether the create webhook or the worker's resend arrives first (I2)
   - a webhook received for our own write adds no outbox row and no extra history row
   - a webhook from Salesforce is never sent back to Salesforce
   - a queued older portal value doesn't overwrite a newer Salesforce value

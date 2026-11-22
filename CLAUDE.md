@@ -63,5 +63,8 @@ unsaved one (D23). The costs we accepted, and the rules that contain them:
 - **`sfSeq` and `sfValue` only move forward:** webhooks, echoes, replies, fetches and sweeps update them
   only when their sequence is newer. An echo kept as sent never changes the field's `actor` or
   `updatedAt` and writes no history row (I1, `docs/inbound.md` 5.2).
+- **Inbound record lookup order is `sf_id` -> `id = Portal_Id__c` (adopt if `sf_id` NULL) -> create**
+  (I2, `docs/inbound.md` 5.3). Never insert a record for a webhook before trying `Portal_Id__c`, or a
+  portal create whose reply was lost becomes two rows.
 - **At most one pending outbox row per record**, enforced by a unique partial index; merge with
   `INSERT ... ON CONFLICT ... DO UPDATE`, never a second pending row.

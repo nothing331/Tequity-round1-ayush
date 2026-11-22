@@ -23,7 +23,7 @@ Salesforce, such as a missing customer or a missing event, it writes a row to `s
 | 1 | Check `X-Timestamp` is within 5 minutes and that `X-Signature` is the HMAC-SHA256 of timestamp + body | `401`, nothing stored, Salesforce doesn't retry | D7 |
 | 2 | Check the body has `eventId`, `recordId`, a known `objectType`, `sequence`, `occurredAt`, `changedBy` and `changedFields` | `400`, nothing stored, logged and counted in M3 | S2 |
 | 3 | `BEGIN`. `INSERT INTO sync.inbox (event_id, received_day, record_id, sequence) ON CONFLICT DO NOTHING` | 0 rows inserted means a duplicate: `COMMIT`, `200`, stop | D18, T4 |
-| 4 | Find the record by `sf_id` and lock its row (`withRecordLock`). If it's unknown, see 5.3 | – | G2, S3, V8 |
+| 4 | Find our row and lock it (`withRecordLock`), in this order: by `sf_id`, then by `id = Portal_Id__c`, then create. See 5.3 | A `Portal_Id__c` row that already holds a **different** `sf_id`: not applied, logged, counted in M3 | G2, I2, S3, V8 |
 | 5 | Is it **our own echo**? Does `changedFields.Portal_Change_Id__c` match an outbox `change_id`? | Mark that outbox row confirmed, and use the echo rules in 5.2 | D17, I1 |
 | 6–7 | For **each field**, run the apply rule in 5.2: sequence first, then time | – | D19, D16 |
 | 8 | Write values, `field_meta`, `sf_seq_max`, `sf_seq_contiguous`, history rows, and any jobs (5.4) | – | data.md |
@@ -38,8 +38,9 @@ handleWebhook(req):
   event = parseAndValidate(req.body)        -> 400
   withTransaction:
     if not insertInbox(event): return 200   -- duplicate
-    withRecordLock(event.recordId):         -- creates the row first if unknown (5.3)
-      state   = loadRecord(event.recordId)
+    row = resolveRecord(event)              -- sf_id -> Portal_Id__c -> create (5.3)
+    withRecordLock(row.id):
+      state   = loadRecord(row.id)
       echoRow = findOutboxByChangeId(event.changedFields.Portal_Change_Id__c)
       result  = applyEvent(state, event, echoRow)    -- pure function, no I/O (subproblem 2)
       write(result.record, result.historyRows, result.jobs, result.outboxConfirm)
@@ -67,15 +68,31 @@ decides.
   late reply can move anything backwards (I1).
 - **Other fields in the same event** are judged separately. An old event's change to a field nobody has
   touched since still lands (D19).
-- **The `Portal_Id__c` and `Portal_Change_Id__c` keys** are used only to recognise an echo. They aren't
-  stored as fields.
+- **The `Portal_Id__c` and `Portal_Change_Id__c` keys** are used to find our own row (5.3) and to recognise
+  an echo. They aren't stored as fields.
 
-## 5.3 A record we don't have yet
+## 5.3 Finding our row, and records we don't have yet
+
+**Lookup order (I2).** `resolveRecord` stops at the first match:
+
+| # | Lookup | If found | Why |
+|---|---|---|---|
+| 1 | `sf_id = recordId` | Use it | The normal case: we already know this record |
+| 2 | `id = changedFields.Portal_Id__c`, locked (`FOR UPDATE`) | `sf_id` NULL: **adopt the row**, setting `sf_id = recordId`. `sf_id` already equal to `recordId` (the worker's reply got there first): use it. `sf_id` **different**: don't apply; log, count in M3 | Our own create whose API reply was lost. The webhook names our row by its External ID (D8, D9) |
+| 3 | Not found, `sequence = 1` | `INSERT … ON CONFLICT (sf_id) DO NOTHING` with `id = Portal_Id__c` if present (else a new UUID) and `sf_id = recordId`, then lock whichever row holds that `sf_id`. It's a **create** carrying every field, so no fetch is needed (V8) | A record created in Salesforce |
+| 4 | Not found, `sequence > 1` | Same insert, holding only the fields received, plus a `fetch_record` job at 5 s, 15 s and 25 s (S3). The fetch stamps fields with the record's sequence (`via = fetch`) | We missed the create |
+
+- **Why this gives exactly one row:** the webhook and the worker both lock **the same portal row** (`id = u-1`)
+  and both write the same `sf_id`. Whoever comes second finds it already set to that value. The unique index on
+  `sf_id`, plus `ON CONFLICT DO NOTHING` in lookups 3–4, means two webhooks racing to create the same
+  Salesforce record also end on one row.
+- A `Portal_Id__c` holding a different `sf_id` would mean Salesforce has two records with our External ID.
+  Assumption 3.2 makes it unique, so this is an alert, never a silent overwrite.
+
+**Other cases:**
 
 | Case | What happens |
 |---|---|
-| Unknown `recordId`, `sequence = 1` | A **create** carrying every field. Insert the row with a new UUID `id` and `sf_id = recordId`, then apply the rule. No fetch is needed (V8) |
-| Unknown `recordId`, `sequence > 1` | We've missed the create. Insert a row holding only the fields received, and add a `fetch_record` job at 5 s, 15 s and 25 s (S3). The fetch stamps fields with the record's sequence (`via = fetch`) |
 | A contact whose `customer` (`AccountId`) we don't have | Store `customer_sf_id` and leave `customer_id` NULL, shown as "customer pending". Add a `fetch_customer` job (D14) |
 | A contact whose `customer` **changed** | Relink `customer_id` to the new customer, or mark it pending and fetch the customer as above |
 | A customer arrives that waiting contacts point at | Link its pending contacts (`customer_sf_id` matches) in batches of 500, each its own transaction (G2b) |
@@ -134,6 +151,8 @@ phone" (sales.user) and "who changed the city" (finance.user). This is the brief
 | Salesforce reformatted the phone we sent | Row c | The reformatted phone is applied, noted "normalised by Salesforce", and never sent back |
 | Sales sets the city at 11:19:59, the webhook arrives after finance's 11:20:00 save | Row e | Portal keeps Noida. `sfValue` becomes Salesforce's value. The pending outbox row sends Noida with a precondition (G1) |
 | A **new** contact (seq 1) whose customer we don't have | 5.3 | Created and shown "customer pending". `fetch_customer` runs |
+| Our portal create's **API reply was lost**, and the create webhook arrives (seq 1, `Portal_Id__c u-1`, our `change_id`) | 5.3 lookup 2, then row b | Row `u-1` is adopted (`sf_id` set) and the outbox row is confirmed `sent`. The fields keep the portal actor, with no history rows. **One contact** (I2) |
+| The same, but the worker's 60 s resend gets there **before** the webhook | 5.3 lookup 1 | The resend's upsert finds the record by External ID, and its reply sets `u-1.sf_id`. The webhook then finds `u-1` by `sf_id`. Still **one contact** |
 
 ## 5.7 Who else uses this path
 

@@ -378,6 +378,23 @@ Clarifications, no decision needed (written into the section)
   - Time budget: one transaction of a few ms; lock_timeout 2 s -> 503 and Salesforce retries.
 
 Frontier empty. Section written to docs/inbound.md.
+
+Round 2 (user's lost-reply create scenario)
+  I2  Lookup order for a webhook whose recordId we don't know but whose Portal_Id__c we do .. OPEN
+      Found: inbound.md step 4 looks up only by sf_id, and 5.3 then inserts a NEW row for
+      sequence 1. A portal create whose API reply timed out ends with two contacts: the
+      original (UUID, sf_id NULL) and a new one holding the Salesforce ID. The echo marks
+      the outbox row sent, so the worker never resends and the original never gets its
+      sf_id. D9 / assumption 3.3 already said "match the create's webhook by Portal_Id__c",
+      but the section never implemented it. If the worker's resend wins the race instead,
+      we get one row, so the outcome depends on timing.
+      DECIDED (a): look up by sf_id -> then id = Portal_Id__c (adopt the row if its sf_id is NULL)
+      -> then create (seq 1, with id = Portal_Id__c if present) or S3 (seq > 1). The worker's
+      late reply or resend locks the same row and finds the same sf_id. A Portal_Id__c row
+      holding a different sf_id is not applied: logged, counted in M3 (cannot happen if the
+      External ID is unique, assumption 3.2). Rejected: park the webhook until the worker sets
+      sf_id (create visible 60 s+ late); allow the duplicate and merge later (visible duplicate,
+      messy merge of history and links).
 ```
 
 ## Decisions

@@ -123,7 +123,7 @@ The brief asks for this section at the top of the design document. Each entry ha
 - **Assumption:**
   - **The reply:** the record ID, success or an error code, the new `LastModifiedDate`, and the record's new `sequence` (its version for the next conditional update, G1).
   - **The ID:** the one returned on create is the permanent ID, and every later webhook carries it. We store only the **18-character** form.
-  - **A lost create reply:** we match the create's webhook by `Portal_Id__c`.
+  - **A lost create reply:** we match the create's webhook by `Portal_Id__c` and adopt our existing row, so there's never a second one (inbound.md 5.3, I2).
 - **If the answer goes the other way:** if Salesforce returns only success with no ID, we always match by `Portal_Id__c`.
 
 ### 3.4 Writable fields and owner (D10)
