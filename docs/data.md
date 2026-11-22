@@ -62,7 +62,7 @@ The two link columns together give three states:
 |---|---|---|
 | Webhook with seq = contiguous + 1 | max(max, seq) | advances to seq, then keeps advancing while the inbox already holds the next sequence |
 | Webhook with seq > contiguous + 1 (a gap) | raised | unchanged. A `replay_record` job is scheduled in 10 s (D19) |
-| Reply to our own write, new seq N | max(max, N) | N, if N = contiguous + 1 |
+| Reply to our own write, new seq N | max(max, N) | N, if N = contiguous + 1. The sent fields' `sfSeq` and `sfValue` move to N **only if N is newer** than what they hold, so a reply arriving after a newer webhook changes nothing (I1) |
 | Fetch or sweep returning the record at seq N | max(max, N) | N: a full read covers everything up to N (history for any missed events is `via fetch` / `reconcile`) |
 
 If Salesforce sends no `sequence` (G3), both columns stay NULL and the precondition uses `sf_last_modified`.
@@ -84,7 +84,7 @@ If Salesforce sends no `sequence` (G3), both columns stay NULL and the precondit
 | `source` | `portal` or `salesforce` | D16 tie-break, badge |
 | `actor` | The person's email, as the brief's samples give it: `changedBy` on a webhook, the logged-in user's email on a portal save (the brief's `editedBy`). For a fetch or sweep, the record's last modifier's email (assumption 3.8) (V4) | history, badge |
 | `sfSeq` | The Salesforce `sequence` that last set this field | D19 out-of-order rule |
-| `sfValue` | The last value Salesforce is known to hold. Set when a webhook is applied and when a send is confirmed | D10 revert after a rejection |
+| `sfValue` | The last value Salesforce is known to hold. Moves forward with `sfSeq` on any webhook, echo or confirmed send, even when the field keeps a newer portal value (inbound.md 5.2) | D10 revert after a rejection |
 
 **Indexes:**
 - `customers(sf_id)` and `contacts(sf_id)`: unique where not NULL. Webhooks look records up by this.

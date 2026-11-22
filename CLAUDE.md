@@ -60,5 +60,8 @@ unsaved one (D23). The costs we accepted, and the rules that contain them:
 - **`field_meta` (JSONB) has no database-enforced shape:** only the apply function writes it, and it
   validates `{updatedAt, source, actor, sfSeq, sfValue}` for every field. Table layouts are in
   `docs/data.md`.
+- **`sfSeq` and `sfValue` only move forward:** webhooks, echoes, replies, fetches and sweeps update them
+  only when their sequence is newer. An echo kept as sent never changes the field's `actor` or
+  `updatedAt` and writes no history row (I1, `docs/inbound.md` 5.2).
 - **At most one pending outbox row per record**, enforced by a unique partial index; merge with
   `INSERT ... ON CONFLICT ... DO UPDATE`, never a second pending row.

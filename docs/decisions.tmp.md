@@ -344,6 +344,42 @@ Other sections to align after V1-V8: systems.md 2.5 (sample keys/changedBy), 2.6
 CLAUDE.md rule 7, subproblems 3, assumptions 3.3/3.8, decisions G1 and S3.
 ```
 
+## Phase 6 - The inbound path (outline item 5)
+
+```
+Needs a decision
+  I1  How an echo is applied when a newer sales edit to the same field got there first,
+      and whose name the field keeps ............................................... DECIDED (a)
+      Found: D17 says only "record its sequence, no duplicate history row". Applied as a
+      normal event, a late echo (seq 4, Noida) could (a) overwrite actor/updatedAt with
+      the integration user, losing "finance changed the city" on the field, and (b) set
+      sfValue to Noida although Salesforce already holds Delhi (seq 5). The worker's
+      2xx reply has the same risk if it arrives after the seq 5 webhook.
+
+I1 decision (a): an echo runs through the normal per-field checks with three exceptions:
+  1. the outbox row is marked confirmed regardless;
+  2. a field Salesforce kept exactly as sent: advance sfSeq and sfValue only if this sequence is newer;
+     keep the portal save's updatedAt, source and actor; no history row;
+  3. a field Salesforce changed (normalised): applied as a Salesforce change "normalised by Salesforce",
+     never sent back (D17).
+  The worker's 2xx reply follows the same "only move forward" rule. Also made explicit: when a
+  Salesforce value loses on time to a newer portal value, sfSeq and sfValue still advance (Salesforce
+  does hold that value) while the field keeps the portal value.
+  Rejected: sequence-only echo (loses normalisation, sfValue depends on a possibly late reply);
+  echo as a fully normal event (integration user replaces finance as the field's actor).
+
+Clarifications, no decision needed (written into the section)
+  - Fields we don't sync (e.g. Description) are ignored and logged; "these fields and no others".
+  - A changed AccountId relinks the contact; an unknown customer -> fetch_customer job.
+  - Two deliveries of the same event at once: the second INSERT waits for the first commit,
+    then does nothing -> 200.
+  - Replay, fetch and sweep results reuse steps 3-9 in the worker, with via = replay /
+    fetch / reconcile; only steps 1-2 (HMAC, body) are receiver-only.
+  - Time budget: one transaction of a few ms; lock_timeout 2 s -> 503 and Salesforce retries.
+
+Frontier empty. Section written to docs/inbound.md.
+```
+
 ## Decisions
 
 ### D1 - Peak and quiet edit rates - DECIDED
@@ -442,6 +478,8 @@ CLAUDE.md rule 7, subproblems 3, assumptions 3.3/3.8, decisions G1 and S3.
   came from Salesforce can never be sent back, so a loop is impossible by construction.
 - Echo: a webhook whose `changedFields.Portal_Change_Id__c` matches a key we sent -> record its sequence,
   mark the outbox row "echo seen", no duplicate history row.
+  **Made precise by I1 (Phase 6):** the echo still goes through the per-field checks; fields kept as sent
+  only move sfSeq/sfValue forward and keep the portal actor; changed fields apply as "normalised".
 - If Salesforce altered our value (e.g. phone reformatted), apply the difference as a Salesforce change
   labelled "normalised by Salesforce"; nothing is sent back (core rule).
 - Rejected: ignore by `changedBy == integration user` (drops real automation changes); value-match echo

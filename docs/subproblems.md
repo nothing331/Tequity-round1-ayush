@@ -61,6 +61,8 @@ next, and standard plumbing comes last.
   - Salesforce edits phone while the portal edits city, and both survive
   - both sides edit city, and the later one wins while the other stays in history
   - on an exact tie, Salesforce wins
+  - **our echo (seq 4) arriving after a newer sales edit (seq 5) leaves the sales value and its actor, and writes no history row** (I1)
+  - our echo kept as sent leaves the field's actor as the portal user, not the integration user (I1)
 
 ## 3. Outbox, idempotent send, and the loop rule
 
@@ -75,7 +77,7 @@ next, and standard plumbing comes last.
 - **Why third:** the next biggest risk is duplicates in Salesforce and loops. Every outbound feature depends on it.
 - **Rules:**
   - **Safe retries (D8, D9):** a retry after a lost reply resends the same content with the same key. The upsert finds the existing record.
-  - **Loop (D17):** only a portal save writes to the outbox. **The webhook path never does.** A webhook carrying our `Portal_Change_Id__c` is an echo: its `sequence` is recorded and no duplicate history row is written. If Salesforce changed our value (e.g. reformatted the phone), the difference is applied as a Salesforce change and never sent back.
+  - **Loop (D17):** only a portal save writes to the outbox. **The webhook path never does.** A webhook carrying our `Portal_Change_Id__c` is an echo: it confirms the outbox row, moves `sfSeq` and `sfValue` forward only if newer, keeps the portal actor, and writes no duplicate history row. If Salesforce changed our value (e.g. reformatted the phone), the difference is applied as a Salesforce change and never sent back (I1, inbound.md 5.2).
   - **Outbox guard (D16):** before sending, drop any field that a newer Salesforce value has already won.
 - **Done when:**
   - a create whose reply is lost, then retried, leaves **one** record in the fake Salesforce
